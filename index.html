@@ -16,6 +16,7 @@
   </div>
   <nav class="tabs" role="tablist">
     <button role="tab" data-tab="designer" class="active">Конструктор</button>
+    <button role="tab" data-tab="bms">Підключення BMS</button>
     <button role="tab" data-tab="fit">Вписування в корпус</button>
     <button role="tab" data-tab="calc">Калькулятори</button>
     <button role="tab" data-tab="match">Балансування комірок</button>
@@ -65,6 +66,7 @@
             <select id="inSnake">
               <option value="cols">По стовпцях</option>
               <option value="rows">По рядах</option>
+              <option value="u">U-подібна (P+ і P− поруч)</option>
             </select>
           </label>
         </div>
@@ -76,6 +78,7 @@
               <option value="groupk">Група.комірка</option>
               <option value="index">Номер комірки</option>
               <option value="capacity">Ємність (з балансування)</option>
+              <option value="current">Струм комірки (розрахунок)</option>
               <option value="none">Без підписів</option>
             </select>
           </label>
@@ -84,7 +87,27 @@
           </label>
         </div>
         <label class="check"><input id="inMirror" type="checkbox" checked> Нижню сторону показувати перевернутою</label>
-        <label class="check"><input id="inBalance" type="checkbox" checked> Показувати балансувальні виводи BMS</label>
+        <label class="check"><input id="inBalance" type="checkbox" checked> Показувати BMS і дроти</label>
+        <label class="check"><input id="inAnalysis" type="checkbox" checked> Підсвітити навантаження перемичок</label>
+
+        <h3>BMS і силові виводи</h3>
+        <div class="row2">
+          <label>BMS розташована
+            <select id="inBmsSide">
+              <option value="right">Праворуч</option>
+              <option value="left">Ліворуч</option>
+              <option value="top">Зверху</option>
+              <option value="bottom">Знизу</option>
+            </select>
+          </label>
+          <label>Силові виводи P+/P−
+            <select id="inLead">
+              <option value="near">Біля BMS</option>
+              <option value="center">Центр крайньої групи</option>
+            </select>
+          </label>
+        </div>
+        <button id="toBms" class="ghost wide" type="button">Налаштування BMS і схема підключення →</button>
 
         <h3>Перемички</h3>
         <label>Матеріал
@@ -135,6 +158,85 @@
           <div class="panel">
             <h3>Порядок збирання</h3>
             <ol class="steps" id="assemblySteps"></ol>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ BMS ============ -->
+  <section id="tab-bms" class="tab-panel">
+    <div class="layout-2col">
+      <aside class="panel controls">
+        <h2>BMS</h2>
+        <p class="hint">Пакет: <b id="bmsCfg"></b>. Змінюється у конструкторі.</p>
+        <label>Тип<select id="bmsType"></select></label>
+        <label>Порт<select id="bmsPort"></select></label>
+        <div class="row2">
+          <label>Каналів (S)<input id="bmsCh" type="number" min="1" max="48"></label>
+          <label>Тривалий струм, А<input id="bmsI" type="number" min="0" step="1"></label>
+        </div>
+        <div class="row2">
+          <label>Струм заряду, А<input id="bmsChA" type="number" min="0" step="0.1"></label>
+          <label>Балансування, А<input id="bmsBal" type="number" min="0" step="0.01"></label>
+        </div>
+        <div class="row2">
+          <label>Датчиків NTC<input id="bmsNtc" type="number" min="0" max="6"></label>
+          <label>Силові дроти, м<input id="bmsLead" type="number" min="0.05" step="0.05"></label>
+        </div>
+        <label class="check"><input id="bmsSw" type="checkbox"> Вимикач на P+</label>
+        <label class="check"><input id="bmsPre" type="checkbox"> Коло попереднього заряду</label>
+        <h3>Розташування на пакеті</h3>
+        <div class="row2">
+          <label>BMS
+            <select id="bmsSide2">
+              <option value="right">Праворуч</option>
+              <option value="left">Ліворуч</option>
+              <option value="top">Зверху</option>
+              <option value="bottom">Знизу</option>
+            </select>
+          </label>
+          <label>Силові виводи
+            <select id="bmsLead2">
+              <option value="near">Біля BMS</option>
+              <option value="center">Центр групи</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint">Порожні поля — автоматичний підбір за струмом навантаження та ємністю.</p>
+        <button id="bmsToDesigner" class="ghost wide" type="button">← До фізичної схеми</button>
+      </aside>
+      <div class="main-col">
+        <div class="panel">
+          <div class="canvas-head">
+            <h2>Електрична схема підключення</h2>
+            <div class="btn-row tight">
+              <button id="bmsSvgBtn">⬇ SVG</button>
+              <button id="bmsPngBtn">⬇ PNG</button>
+            </div>
+          </div>
+          <div class="svg-wrap schem-wrap" id="bmsHost"></div>
+        </div>
+        <div class="panel">
+          <h3 class="first">Перевірки</h3>
+          <ul class="checks" id="bmsChecks"></ul>
+        </div>
+        <div class="panel">
+          <h3 class="first">Балансувальні дроти</h3>
+          <p class="hint">Перед підключенням роз'єму до BMS перевірте напругу кожного піна відносно B0 (мін. / ном. / макс.).</p>
+          <div class="tbl-scroll"><table class="tbl" id="bmsWires"></table></div>
+        </div>
+        <div class="layout-2eq">
+          <div class="panel">
+            <h3 class="first">Пороги захисту</h3>
+            <p class="hint" id="bmsProtNote"></p>
+            <div class="tbl-scroll"><table class="tbl" id="bmsProt"></table></div>
+          </div>
+          <div class="panel">
+            <h3 class="first">Силове коло</h3>
+            <div class="result" id="bmsPower"></div>
+            <h3>Порядок підключення</h3>
+            <ol class="steps" id="bmsSteps"></ol>
           </div>
         </div>
       </div>

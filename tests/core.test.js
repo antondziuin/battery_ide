@@ -5,6 +5,9 @@ import { generateLayout, packStats } from '../js/layout.js';
 import { fitLayouts, bestConfigs, checkConfig, chooseRows, countAlong, requiredBox } from '../js/fit.js';
 import { stripCalc, wireCalc, sizePack, parseCellList, balanceCells, runtimeCalc } from '../js/tools.js';
 import { renderPackSVG, renderFitSVG } from '../js/render.js';
+import { analyzeCurrents } from '../js/analysis.js';
+import { bmsPlan, protectionProfile, wireColor } from '../js/bms.js';
+import { renderBmsSVG } from '../js/schematic.js';
 
 const c18650 = BUILTIN_CELLS.find((c) => c.id === '18650-generic');
 const c21700 = BUILTIN_CELLS.find((c) => c.id === 'samsung-50e');
@@ -20,7 +23,7 @@ test('усі вбудовані комірки валідні та мають у
 });
 
 for (const arrangement of ['grid', 'honeycomb', 'honeycomb2'])
-  for (const snake of ['cols', 'rows'])
+  for (const snake of ['cols', 'rows', 'u'])
     for (const [S, P, rows] of [[4, 3, 3], [10, 4, 4], [13, 4, 6], [7, 3, 2], [5, 1, 1], [3, 5, 4], [14, 5, 7]])
       test(`${arrangement}/${snake} ${S}S${P}P rows=${rows}: групи суцільні, послідовні з'єднання існують`, () => {
         const L = generateLayout({ S, P, rows, arrangement, snake, gap: 0.5, cell: c18650 });
@@ -223,4 +226,118 @@ test('призматичні в один ряд: лише сусідні ком�
   const L = generateLayout({ S: 8, P: 2, rows: 1, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: prism });
   for (let j = 1; j < 8; j++) assert.equal(L.buses[j].seriesLinks, 1);
   assert.equal(L.buses[1].links.length, 3);
+});
+
+const strip = { material: 'nickel', width: 8, thickness: 0.15, layers: 1 };
+
+test('U-подібна змійка: P+ і P− з одного боку пакета', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 8, arrangement: 'grid', snake: 'u', gap: 0.5, cell: c21700 });
+  assert.equal(L.snake, 'u');
+  assert.deepEqual(L.warnings, []);
+  const g0 = L.cells.filter((c) => c.group === 0), gLast = L.cells.filter((c) => c.group === 9);
+  assert.ok(g0.every((c) => c.col === 0));
+  assert.ok(gLast.every((c) => c.col === 0));
+  assert.ok(g0.every((c) => c.row < 4) && gLast.every((c) => c.row >= 4));
+});
+
+test('точки підключення: балансувальні дроти біля BMS, силові — за вибором', () => {
+  const base = { S: 6, P: 3, rows: 3, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c18650 };
+  const R = generateLayout({ ...base, bmsSide: 'right' });
+  const Lf = generateLayout({ ...base, bmsSide: 'left' });
+  for (const b of R.buses) {
+    const tap = R.cells[b.tap];
+    assert.ok(b.members.includes(b.tap));
+    // жодна комірка шини не ближча до правого краю
+    assert.ok(b.members.every((id) => R.cells[id].x <= tap.x + 1e-9));
+  }
+  assert.ok(Lf.buses.every((b) => b.members.every((id) => Lf.cells[id].x >= Lf.cells[b.tap].x - 1e-9)));
+  const C = generateLayout({ ...base, leadAttach: 'center' });
+  assert.equal(C.cells[C.buses[0].power].row, 1); // середній ряд групи 1
+  assert.equal(C.buses[0].tap, C.buses[0].power);
+  assert.equal(C.buses[3].power, null);
+});
+
+test('аналіз струмів: 3S1P — кожна комірка несе весь струм', () => {
+  const L = generateLayout({ S: 3, P: 1, rows: 1, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c18650 });
+  const a = analyzeCurrents(L, c18650, { load: 5, strip });
+  assert.ok(a.ok);
+  for (const v of a.cellI) assert.ok(Math.abs(v - 5) < 1e-6, String(v));
+  // спад = 3 комірки × r + 2 перемички
+  assert.ok(a.drop > 3 * 5 * 0.025 && a.drop < 3 * 5 * 0.025 + 0.05);
+});
+
+test('аналіз струмів: сума струмів кожної групи дорівнює навантаженню', () => {
+  for (const snake of ['cols', 'u']) {
+    const L = generateLayout({ S: 10, P: 4, rows: snake === 'u' ? 8 : 4, arrangement: 'grid', snake, gap: 0.5, cell: c21700 });
+    const a = analyzeCurrents(L, c21700, { load: 20, strip });
+    assert.ok(a.ok);
+    for (let g = 0; g < 10; g++) {
+      const sum = L.cells.filter((c) => c.group === g).reduce((s, c) => s + a.cellI[c.id], 0);
+      assert.ok(Math.abs(sum - 20) < 1e-6, `${snake} група ${g + 1}: ${sum}`);
+    }
+    assert.ok(a.cellI.every((v) => v > 0));
+    assert.ok(a.maxLink.I > 0 && a.maxLink.I <= 20 + 1e-6);
+  }
+});
+
+test('аналіз струмів: вивід у центрі групи зменшує розбаланс', () => {
+  const base = { S: 4, P: 7, rows: 7, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c18650, bmsSide: 'top' };
+  const near = analyzeCurrents(generateLayout({ ...base, leadAttach: 'near' }), c18650, { load: 30, strip });
+  const center = analyzeCurrents(generateLayout({ ...base, leadAttach: 'center' }), c18650, { load: 30, strip });
+  assert.ok(center.worstGroup.imbalance < near.worstGroup.imbalance, `${center.worstGroup.imbalance} vs ${near.worstGroup.imbalance}`);
+  // мідь розподіляє струм рівномірніше за нікель
+  const cu = analyzeCurrents(generateLayout({ ...base, leadAttach: 'near' }), c18650, { load: 30, strip: { ...strip, material: 'copper' } });
+  assert.ok(cu.worstGroup.imbalance < near.worstGroup.imbalance);
+});
+
+test('аналіз без навантаження не виконується', () => {
+  const L = generateLayout({ S: 2, P: 2, rows: 2, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c18650 });
+  assert.equal(analyzeCurrents(L, c18650, { load: 0, strip }).ok, false);
+});
+
+test('профіль захисту залежить від хімії', () => {
+  const li = protectionProfile(c21700);
+  assert.equal(li.charge, 4.2);
+  assert.ok(li.ovp > li.charge && li.uvp < li.uvpr);
+  const lfp = protectionProfile(prism);
+  assert.ok(lfp.charge <= 3.65 && lfp.ovp <= 3.7);
+  const unknown = protectionProfile({ ...c18650, chem: 'Інше' });
+  assert.equal(unknown.known, false);
+});
+
+test('план BMS: дроти, запобіжник, перевірки', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700 });
+  const plan = bmsPlan(c21700, L, { type: 'hardware', port: 'common', ntc: 1, sw: true }, 20);
+  assert.equal(plan.wires.length, 11);
+  assert.equal(plan.wires[0].color, wireColor(0));
+  assert.ok(Math.abs(plan.wires[10].vNom - 36) < 1e-9);
+  assert.ok(plan.bmsCurrent >= 25);
+  assert.ok(plan.fuse >= 25);
+  assert.ok(plan.power.recommended.amps >= plan.fuse);
+  assert.ok(Math.abs(plan.pack.charge - 42) < 1e-9);
+  assert.ok(plan.checks.some((c) => c.level === 'ok'));
+  assert.ok(!plan.checks.some((c) => c.level === 'bad'));
+  // замала BMS і зайві канали апаратної BMS — помилки
+  const bad = bmsPlan(c21700, L, { type: 'hardware', port: 'common', channels: 13, current: 10 }, 20);
+  assert.ok(bad.checks.filter((c) => c.level === 'bad').length >= 2);
+  const smart = bmsPlan(c21700, L, { type: 'smart', port: 'separate', channels: 16, ntc: 2 }, 20);
+  assert.equal(smart.unused, 6);
+  assert.ok(smart.checks.some((c) => c.level === 'warn' && c.text.includes('B11')));
+});
+
+test('SVG схеми BMS та фізичної схеми з аналізом', () => {
+  const L = generateLayout({ S: 13, P: 4, rows: 8, arrangement: 'grid', snake: 'u', gap: 0.5, cell: c21700, bmsSide: 'left', leadAttach: 'center' });
+  for (const [type, port, channels] of [['hardware', 'common', 0], ['smart', 'separate', 16]]) {
+    const plan = bmsPlan(c21700, L, { type, port, channels, ntc: 2, sw: true, precharge: true }, 30);
+    const svg = renderBmsSVG(plan, c21700, 30);
+    assert.ok(svg.startsWith('<svg') && svg.includes('B13') && svg.includes('Запобіжник'));
+    assert.ok(!/NaN|undefined|Infinity/.test(svg));
+    if (port === 'separate') assert.ok(svg.includes('C−'));
+  }
+  const a = analyzeCurrents(L, c21700, { load: 30, strip });
+  const pack = renderPackSVG(L, { analysis: a, labels: 'current', mirrorBottom: true });
+  assert.ok(pack.includes('BMS') && pack.includes('P+') && pack.includes('<title>'));
+  assert.ok(!/NaN|undefined|Infinity/.test(pack));
+  const pr = generateLayout({ S: 8, P: 2, rows: 1, arrangement: 'grid', snake: 'cols', gap: 1, cell: prism, bmsSide: 'bottom' });
+  assert.ok(!/NaN|undefined/.test(renderPackSVG(pr, { analysis: analyzeCurrents(pr, prism, { load: 100, strip }) })));
 });
