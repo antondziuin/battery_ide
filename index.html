@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Battery IDE — конструктор акумуляторних збірок</title>
+  <meta name="description" content="Генератор схем збірки акумуляторів SxP, вписування в корпус, калькулятори нікелю, дроту, часу роботи та балансування комірок.">
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='5' width='20' height='25' rx='3' fill='%232456c7'/%3E%3Crect x='12' y='2' width='8' height='4' rx='1' fill='%232456c7'/%3E%3Cpath d='M17 9l-6 10h5l-1 7 6-10h-5z' fill='%23fff'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect x="6" y="5" width="20" height="25" rx="3" fill="currentColor"/><rect x="12" y="2" width="8" height="4" rx="1" fill="currentColor"/><path d="M17 9l-6 10h5l-1 7 6-10h-5z" fill="var(--bg)"/></svg>
+    <span>Battery IDE</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="designer" class="active">Конструктор</button>
+    <button role="tab" data-tab="fit">Вписування в корпус</button>
+    <button role="tab" data-tab="calc">Калькулятори</button>
+    <button role="tab" data-tab="match">Балансування комірок</button>
+    <button role="tab" data-tab="cells">Довідник комірок</button>
+  </nav>
+  <div class="top-actions">
+    <button id="themeBtn" class="ghost" title="Тема">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ КОНСТРУКТОР ============ -->
+  <section id="tab-designer" class="tab-panel active">
+    <div class="layout-2col">
+      <aside class="panel controls">
+        <h2>Параметри збірки</h2>
+        <label>Комірка
+          <select id="cellSelect"></select>
+        </label>
+        <div class="cell-info" id="cellInfo"></div>
+        <div class="row2">
+          <label>Послідовно (S)
+            <input id="inS" type="number" min="1" max="60" value="4">
+          </label>
+          <label>Паралельно (P)
+            <input id="inP" type="number" min="1" max="60" value="3">
+          </label>
+        </div>
+        <div class="presets" id="presets"></div>
+        <div class="row2">
+          <label>Рядів
+            <input id="inRows" type="number" min="1" max="200" placeholder="авто">
+          </label>
+          <label>Зазор, мм
+            <input id="inGap" type="number" min="0" max="20" step="0.1" value="0.5">
+          </label>
+        </div>
+        <div class="row2">
+          <label>Розташування
+            <select id="inArr">
+              <option value="grid">Сітка</option>
+              <option value="honeycomb">Стільники</option>
+              <option value="honeycomb2">Стільники щільні</option>
+            </select>
+          </label>
+          <label>Змійка груп
+            <select id="inSnake">
+              <option value="cols">По стовпцях</option>
+              <option value="rows">По рядах</option>
+            </select>
+          </label>
+        </div>
+        <label class="check" id="rotateWrap"><input id="inRotate" type="checkbox"> Повернути призматичні комірки на 90°</label>
+        <div class="row2">
+          <label>Підписи
+            <select id="inLabels">
+              <option value="group">Номер групи</option>
+              <option value="groupk">Група.комірка</option>
+              <option value="index">Номер комірки</option>
+              <option value="capacity">Ємність (з балансування)</option>
+              <option value="none">Без підписів</option>
+            </select>
+          </label>
+          <label>Струм навантаження, А
+            <input id="inLoad" type="number" min="0" step="0.5" value="10">
+          </label>
+        </div>
+        <label class="check"><input id="inMirror" type="checkbox" checked> Нижню сторону показувати перевернутою</label>
+        <label class="check"><input id="inBalance" type="checkbox" checked> Показувати балансувальні виводи BMS</label>
+
+        <h3>Перемички</h3>
+        <label>Матеріал
+          <select id="inStripMat"></select>
+        </label>
+        <div class="row3">
+          <label>Ширина, мм
+            <input id="inStripW" type="number" min="1" step="0.5" value="8">
+          </label>
+          <label>Товщина, мм
+            <input id="inStripT" type="number" min="0.05" step="0.05" value="0.15">
+          </label>
+          <label>Шарів
+            <input id="inStripL" type="number" min="1" max="6" value="1">
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button id="btnSvg">⬇ SVG</button>
+          <button id="btnPng">⬇ PNG</button>
+          <button id="btnPrint" class="ghost">🖶 Друк</button>
+        </div>
+        <div class="btn-row">
+          <button id="btnSave" class="ghost">Зберегти проєкт</button>
+          <label class="button ghost file-btn">Відкрити…<input id="fileLoad" type="file" accept=".json,application/json" hidden></label>
+        </div>
+      </aside>
+
+      <div class="main-col">
+        <div class="panel canvas-panel">
+          <div class="canvas-head">
+            <h2 id="schemeTitle">Схема</h2>
+            <div class="zoom">
+              <button class="ghost" data-zoom="-1" title="Зменшити">−</button>
+              <button class="ghost" data-zoom="0" title="Вмістити">⤢</button>
+              <button class="ghost" data-zoom="1" title="Збільшити">+</button>
+            </div>
+          </div>
+          <div id="warnings"></div>
+          <div class="svg-wrap" id="svgWrap"><div id="svgHost"></div></div>
+        </div>
+        <div class="cards" id="statsCards"></div>
+        <div class="layout-2eq">
+          <div class="panel">
+            <h3>Специфікація (BOM)</h3>
+            <div class="tbl-scroll"><table class="tbl" id="bomTable"></table></div>
+          </div>
+          <div class="panel">
+            <h3>Порядок збирання</h3>
+            <ol class="steps" id="assemblySteps"></ol>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ВПИСУВАННЯ ============ -->
+  <section id="tab-fit" class="tab-panel">
+    <div class="layout-2col">
+      <aside class="panel controls">
+        <h2>Корпус</h2>
+        <p class="hint">Внутрішні розміри корпусу. Комірка береться з конструктора.</p>
+        <div class="row3">
+          <label>L, мм<input id="boxL" type="number" min="1" value="150"></label>
+          <label>W, мм<input id="boxW" type="number" min="1" value="90"></label>
+          <label>H, мм<input id="boxH" type="number" min="1" value="75"></label>
+        </div>
+        <div class="row2">
+          <label>Відступ від стінок, мм<input id="fitMargin" type="number" min="0" step="0.5" value="2"></label>
+          <label>Зазор між комірками, мм<input id="fitGap" type="number" min="0" step="0.1" value="0.5"></label>
+        </div>
+        <div class="row2">
+          <label>Запас уздовж осі, мм
+            <input id="fitDepth" type="number" min="0" step="0.5" value="4">
+          </label>
+          <label>Між шарами, мм
+            <input id="fitLayerGap" type="number" min="0" step="0.5" value="2">
+          </label>
+        </div>
+        <p class="hint">Запас уздовж осі — нікель з обох боків, ізоляція, тримачі.</p>
+        <label class="check"><input id="fitLayers" type="checkbox"> Дозволити кілька шарів</label>
+
+        <h3>Що шукаємо</h3>
+        <div class="seg" id="fitModeSeg">
+          <button data-mode="range" class="active">Підбір S×P</button>
+          <button data-mode="check">Перевірити S×P</button>
+          <button data-mode="box">Корпус під схему</button>
+        </div>
+        <div id="fitRange" class="fit-mode">
+          <div class="row2">
+            <label>S від<input id="fitSmin" type="number" min="1" value="1"></label>
+            <label>S до<input id="fitSmax" type="number" min="1" value="16"></label>
+          </div>
+          <label>Або цільова напруга, В
+            <input id="fitVolt" type="number" min="0" step="0.1" placeholder="напр. 36">
+          </label>
+        </div>
+        <div id="fitCheck" class="fit-mode" hidden>
+          <p class="hint">Перевіряється конфігурація з конструктора: <b id="fitCheckCfg"></b></p>
+        </div>
+        <div id="fitBox" class="fit-mode" hidden>
+          <p class="hint">Мінімальні внутрішні розміри корпусу для поточної схеми конструктора з урахуванням відступів.</p>
+        </div>
+        <button id="fitRun" class="primary">Розрахувати</button>
+      </aside>
+      <div class="main-col">
+        <div class="panel">
+          <h2>Результати</h2>
+          <div id="fitSummary" class="hint"></div>
+          <div class="tbl-scroll"><table class="tbl clickable" id="fitTable"></table></div>
+        </div>
+        <div class="panel">
+          <div class="canvas-head">
+            <h2>Переріз корпусу</h2>
+            <button id="fitApply" class="primary" disabled>Відкрити в конструкторі</button>
+          </div>
+          <div class="svg-wrap fit-wrap" id="fitHost"><p class="hint">Оберіть рядок у таблиці.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ КАЛЬКУЛЯТОРИ ============ -->
+  <section id="tab-calc" class="tab-panel">
+    <div class="grid-calc">
+      <div class="panel">
+        <h2>Підбір конфігурації під вимоги</h2>
+        <p class="hint">Комірка — з конструктора.</p>
+        <div class="row2">
+          <label>Напруга, В<input id="szV" type="number" min="1" step="0.1" value="36"></label>
+          <label>Як рахувати S
+            <select id="szMode">
+              <option value="nearest">Найближча номінальна</option>
+              <option value="max">Vmax не вище цільової</option>
+              <option value="min">Vmin не нижче цільової</option>
+            </select>
+          </label>
+        </div>
+        <div class="row2">
+          <label>Ємність, А·год<input id="szAh" type="number" min="0" step="0.1" value="10"></label>
+          <label>або енергія, Вт·год<input id="szWh" type="number" min="0" step="1"></label>
+        </div>
+        <div class="row2">
+          <label>Тривалий струм, А<input id="szI" type="number" min="0" step="0.5" value="20"></label>
+          <label>Піковий струм, А<input id="szPk" type="number" min="0" step="0.5"></label>
+        </div>
+        <div class="result" id="szOut"></div>
+        <button id="szApply" class="primary">Застосувати в конструкторі</button>
+      </div>
+
+      <div class="panel">
+        <h2>Нікелева стрічка</h2>
+        <div class="row2">
+          <label>Матеріал<select id="nsMat"></select></label>
+          <label>Шарів<input id="nsL" type="number" min="1" max="6" value="1"></label>
+        </div>
+        <div class="row3">
+          <label>Ширина, мм<input id="nsW" type="number" min="1" step="0.5" value="8"></label>
+          <label>Товщина, мм<input id="nsT" type="number" min="0.05" step="0.05" value="0.15"></label>
+          <label>Довжина, мм<input id="nsLen" type="number" min="0" step="1" value="20"></label>
+        </div>
+        <label>Струм, А<input id="nsI" type="number" min="0" step="0.5" value="5"></label>
+        <div class="result" id="nsOut"></div>
+        <p class="hint">Оцінка допустимого струму наближена (нагрів у повітрі ≈ +30…40 °C). Для потужних збірок використовуйте мідь або шини.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Перетин силового дроту</h2>
+        <div class="row2">
+          <label>Струм, А<input id="wrI" type="number" min="0" step="0.5" value="30"></label>
+          <label>Довжина в один бік, м<input id="wrLen" type="number" min="0" step="0.05" value="0.5"></label>
+        </div>
+        <div class="row2">
+          <label>Напруга, В<input id="wrV" type="number" min="0" step="0.1" value="36"></label>
+          <label>Допустиме падіння, %<input id="wrDrop" type="number" min="0.1" step="0.1" value="2"></label>
+        </div>
+        <div class="result" id="wrOut"></div>
+        <div class="tbl-scroll small"><table class="tbl" id="wrTable"></table></div>
+      </div>
+
+      <div class="panel">
+        <h2>Час роботи та заряду</h2>
+        <label class="check"><input id="rtFromPack" type="checkbox" checked> Брати пакет з конструктора</label>
+        <div class="row2">
+          <label>Напруга, В<input id="rtV" type="number" min="0" step="0.1" value="36"></label>
+          <label>Ємність, А·год<input id="rtAh" type="number" min="0" step="0.1" value="10"></label>
+        </div>
+        <div class="row2">
+          <label>Навантаження, Вт<input id="rtW" type="number" min="0" step="1" value="250"></label>
+          <label>ККД, %<input id="rtEff" type="number" min="1" max="100" value="90"></label>
+        </div>
+        <div class="row2">
+          <label>Використовувана глибина розряду, %<input id="rtDod" type="number" min="1" max="100" value="90"></label>
+          <label>Струм зарядки, А<input id="rtCh" type="number" min="0" step="0.1" value="2"></label>
+        </div>
+        <div class="result" id="rtOut"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ БАЛАНСУВАННЯ ============ -->
+  <section id="tab-match" class="tab-panel">
+    <div class="layout-2col">
+      <aside class="panel controls">
+        <h2>Розподіл комірок по групах</h2>
+        <p class="hint">Вставте виміряні ємності (мА·год), по одній на рядок. Можна додати внутрішній опір (мОм) через пробіл, а також мітку: <code>A1 3450 22</code>.</p>
+        <textarea id="mtInput" rows="14" spellcheck="false"></textarea>
+        <div class="row2">
+          <label>S<input id="mtS" type="number" min="1" value="4"></label>
+          <label>P<input id="mtP" type="number" min="1" value="3"></label>
+        </div>
+        <div class="btn-row">
+          <button id="mtFromDesigner" class="ghost">S і P з конструктора</button>
+          <button id="mtDemo" class="ghost">Приклад</button>
+        </div>
+        <button id="mtRun" class="primary">Розподілити</button>
+      </aside>
+      <div class="main-col">
+        <div class="panel">
+          <h2>Результат</h2>
+          <div id="mtSummary"></div>
+          <div id="mtGroups" class="groups"></div>
+          <div class="btn-row">
+            <button id="mtApply" class="primary" disabled>Показати на схемі</button>
+            <button id="mtCsv" class="ghost" disabled>⬇ CSV</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ДОВІДНИК ============ -->
+  <section id="tab-cells" class="tab-panel">
+    <div class="layout-2col">
+      <aside class="panel controls">
+        <h2>Власна комірка</h2>
+        <form id="cellForm">
+          <label>Назва<input name="name" required placeholder="Моя комірка"></label>
+          <div class="row2">
+            <label>Форма
+              <select name="shape">
+                <option value="cyl">Циліндрична</option>
+                <option value="prism">Призматична</option>
+              </select>
+            </label>
+            <label>Хімія
+              <select name="chem">
+                <option>Li-ion</option><option>LiFePO4</option><option>LTO</option><option>NiMH</option><option>Na-ion</option>
+              </select>
+            </label>
+          </div>
+          <div class="row3">
+            <label class="f-cyl">Діаметр, мм<input name="d" type="number" step="0.01" value="18.5"></label>
+            <label class="f-prism" hidden>Ширина, мм<input name="w" type="number" step="0.1"></label>
+            <label class="f-prism" hidden>Товщина, мм<input name="t" type="number" step="0.1"></label>
+            <label>Висота, мм<input name="h" type="number" step="0.01" value="65"></label>
+          </div>
+          <div class="row3">
+            <label>Ємність, А·год<input name="capacity" type="number" step="0.01" value="3"></label>
+            <label>Струм max, А<input name="iMax" type="number" step="0.1" value="10"></label>
+            <label>Маса, г<input name="mass" type="number" step="0.1" value="47"></label>
+          </div>
+          <div class="row3">
+            <label>Vmin<input name="vMin" type="number" step="0.01" value="2.5"></label>
+            <label>Vnom<input name="vNom" type="number" step="0.01" value="3.6"></label>
+            <label>Vmax<input name="vMax" type="number" step="0.01" value="4.2"></label>
+          </div>
+          <label>Внутрішній опір, мОм<input name="ir" type="number" step="0.1" value="25"></label>
+          <div id="cellFormErr" class="err"></div>
+          <button class="primary" type="submit">Додати комірку</button>
+        </form>
+      </aside>
+      <div class="main-col">
+        <div class="panel">
+          <h2>Комірки</h2>
+          <input id="cellSearch" type="search" placeholder="Пошук…" class="search">
+          <div class="tbl-scroll"><table class="tbl clickable" id="cellsTable"></table></div>
+          <p class="hint">Дані орієнтовні — звіряйтеся з даташитом виробника. Натисніть рядок, щоб обрати комірку.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  Battery IDE · Схеми є допоміжними: збирайте акумулятори з BMS, запобіжником і дотриманням техніки безпеки.
+</footer>
+
+<div id="toast" class="toast" hidden></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
