@@ -40,6 +40,14 @@ npm start
 
 Після запуску відкрийте http://localhost:8080. Можна також використати `python3 -m http.server` або розмістити файли на GitHub Pages.
 
+## Деплой на GitHub Pages
+
+Workflow `.github/workflows/pages.yml` запускає тести і публікує сайт (`index.html`, `css/`, `js/`) при кожному push у `main`. Також його можна запустити вручну на вкладці **Actions** (Run workflow).
+
+Одноразове налаштування: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+
+Адреса сайту: `https://<користувач>.github.io/battery_ide/`.
+
 ## Тести
 
 ```bash
