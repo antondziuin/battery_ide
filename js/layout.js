@@ -18,11 +18,15 @@ export function cellFootprint(cell, rotate = false) {
 /**
  * Автоматична кількість рядів: для циліндричних — класичне «група = стовпець»,
  * для призматичних — один ряд (клеми сусідніх комірок поруч).
+ * Для U-подібної змійки рядів удвічі більше: група йде «туди» верхнім блоком і «назад» нижнім.
  */
-export function autoRows(S, P, shape = 'cyl') {
+export function autoRows(S, P, shape = 'cyl', snake = 'cols') {
+  if (snake === 'u' && S >= 2) return shape === 'prism' ? 2 : 2 * P;
   if (P <= 1 || shape === 'prism') return 1;
   return P;
 }
+
+export const BMS_SIDES = ['right', 'left', 'top', 'bottom'];
 
 /**
  * @param {object} o
@@ -30,7 +34,9 @@ export function autoRows(S, P, shape = 'cyl') {
  * @param {number} o.P  кількість паралельних комірок у групі
  * @param {number} o.rows кількість рядів
  * @param {'grid'|'honeycomb'} o.arrangement
- * @param {'cols'|'rows'} o.snake напрямок «змійки»
+ * @param {'cols'|'rows'|'u'} o.snake напрямок «змійки» (u — P+ і P− з одного боку)
+ * @param {'right'|'left'|'top'|'bottom'} [o.bmsSide] з якого боку пакета стоїть BMS
+ * @param {'near'|'center'} [o.leadAttach] куди приварювати силові дроти P+/P−
  * @param {number} o.gap зазор між комірками, мм
  * @param {object} o.cell комірка
  * @param {boolean} [o.rotate] поворот призматичної комірки
@@ -45,11 +51,12 @@ export function generateLayout(o) {
   const honey = (o.arrangement === 'honeycomb' || o.arrangement === 'honeycomb2') && cell.shape === 'cyl';
   // щільні стільники: зміщені ряди мають на одну комірку менше, змійка лише по рядах
   let dense = honey && o.arrangement === 'honeycomb2';
-  let snake = o.snake === 'rows' || dense ? 'rows' : 'cols';
+  let snake = dense ? 'rows' : ['rows', 'u'].includes(o.snake) ? o.snake : 'cols';
   const px = fp.w + gap;
   const py = honey ? (fp.w + gap) * SQRT3_2 : fp.h + gap;
 
-  let R = Math.max(1, Math.min(Math.floor(o.rows) || autoRows(S, P, cell.shape), N));
+  let R = Math.max(1, Math.min(Math.floor(o.rows) || autoRows(S, P, cell.shape, snake), N));
+  if (snake === 'u' && R < 2) snake = 'cols';
   let C;
   if (dense) {
     C = denseCols(N, R);
@@ -63,7 +70,21 @@ export function generateLayout(o) {
 
   const rowLen = (r) => (dense && r % 2 ? C - 1 : C);
   const order = [];
-  if (snake === 'cols') {
+  if (snake === 'u') {
+    // верхній блок рядів [0, R1) — змійкою зліва направо, нижній [R1, R) — справа наліво.
+    // Напрямок першого стовпця обрано так, щоб верхній блок закінчувався біля нижнього.
+    const R1 = Math.ceil(R / 2), R2 = R - R1;
+    C = Math.ceil(N / R);
+    const startDown = C % 2 === 1;
+    for (let c = 0; c < C; c++) {
+      const down = (c % 2 === 0) === startDown;
+      for (let i = 0; i < R1; i++) order.push([down ? i : R1 - 1 - i, c]);
+    }
+    for (let t = 0; t < C; t++) {
+      const c = C - 1 - t;
+      for (let i = 0; i < R2; i++) order.push([R1 + (t % 2 === 0 ? i : R2 - 1 - i), c]);
+    }
+  } else if (snake === 'cols') {
     for (let c = 0; c < C; c++)
       for (let i = 0; i < R; i++) order.push([c % 2 ? R - 1 - i : i, c]);
   } else {
@@ -122,6 +143,33 @@ export function generateLayout(o) {
     });
   }
 
+  // Точки підключення: балансувальні дроти — до комірки шини, найближчої до BMS;
+  // силові P−/P+ — біля BMS або в центрі крайньої групи.
+  const bmsSide = BMS_SIDES.includes(o.bmsSide) ? o.bmsSide : 'right';
+  const leadAttach = o.leadAttach === 'center' ? 'center' : 'near';
+  const edgeDist = (c) => ({ right: width - c.x, left: c.x, top: c.y, bottom: height - c.y }[bmsSide]);
+  const alongEdge = (c) => (bmsSide === 'left' || bmsSide === 'right' ? Math.abs(c.y - height / 2) : Math.abs(c.x - width / 2));
+  const nearest = (list) => list.reduce((m, c) => {
+    const d = edgeDist(c) - edgeDist(m);
+    return d < -1e-6 || (Math.abs(d) <= 1e-6 && alongEdge(c) < alongEdge(m)) ? c : m;
+  });
+  const central = (list) => {
+    const cx = list.reduce((s, c) => s + c.x, 0) / list.length, cy = list.reduce((s, c) => s + c.y, 0) / list.length;
+    return list.reduce((m, c) => (Math.hypot(c.x - cx, c.y - cy) < Math.hypot(m.x - cx, m.y - cy) - 1e-6 ? c : m));
+  };
+  for (const b of buses) {
+    const mem = b.members.map((id) => cells[id]);
+    if (b.index === 0 || b.index === S) {
+      const grp = byGroup[b.index === 0 ? 0 : S - 1];
+      b.power = (leadAttach === 'center' ? central(grp) : nearest(grp)).id;
+      b.tap = b.power;
+    } else {
+      b.power = null;
+      b.tap = nearest(mem).id;
+    }
+    b.tapDist = edgeDist(cells[b.tap]);
+  }
+
   const warnings = [];
   for (const b of buses) {
     if (b.index > 0 && b.index < S && b.seriesLinks === 0)
@@ -135,6 +183,7 @@ export function generateLayout(o) {
   return {
     S, P, N, rows: usedRows, cols: usedCols, cells, buses, width, height,
     pitchX: px, pitchY: py, footprint: fp, shape: cell.shape, honey, dense, snake, rotate: !!o.rotate,
+    bmsSide, leadAttach,
     warnings, minSeries, weakestBus,
     stripLength: buses.reduce((s, b) => s + b.links.reduce((t, l) => t + l.len, 0), 0),
     linkCount: buses.reduce((s, b) => s + b.links.length, 0),

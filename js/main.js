@@ -3,6 +3,9 @@ import { generateLayout, packStats, autoRows } from './layout.js';
 import { bestConfigs, checkConfig, requiredBox } from './fit.js';
 import { renderPackSVG, renderFitSVG, svgToPng } from './render.js';
 import { STRIP_MATERIALS, stripCalc, wireCalc, runtimeCalc, sizePack, parseCellList, balanceCells } from './tools.js';
+import { analyzeCurrents } from './analysis.js';
+import { bmsPlan, BMS_TYPES, BMS_PORTS } from './bms.js';
+import { renderBmsSVG } from './schematic.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -18,7 +21,9 @@ const state = {
   S: 10, P: 4, rows: '', gap: 0.5, arrangement: 'grid', snake: 'cols', rotate: false,
   labels: 'group', load: 20, mirror: true, balance: true,
   stripMat: 'nickel', stripW: 8, stripT: 0.15, stripL: 1,
+  bmsSide: 'right', leadAttach: 'near', analysis: true,
   zoom: 1,
+  bms: { type: 'hardware', port: 'common', channels: 0, current: 0, chargeA: 0, balanceA: 0.05, ntc: 1, sw: true, precharge: false, leadLen: 0.3 },
   matching: null, // { S, P, groups: [[cap...]] }
   fit: { L: 150, W: 90, H: 75, margin: 2, gap: 0.5, depth: 4, layerGap: 2, layers: false, mode: 'range', smin: 1, smax: 16, volt: '' },
 };
@@ -31,7 +36,7 @@ function load() {
 }
 function mergeState(obj) {
   if (!obj || typeof obj !== 'object') return;
-  for (const k of Object.keys(state)) if (k in obj) state[k] = k === 'fit' ? { ...state.fit, ...obj.fit } : obj[k];
+  for (const k of Object.keys(state)) if (k in obj) state[k] = k === 'fit' || k === 'bms' ? { ...state[k], ...obj[k] } : obj[k];
 }
 let saveTimer;
 function save() {
@@ -67,6 +72,7 @@ function showTab(id) {
   history.replaceState(null, '', `#${id}`);
   if (id === 'fit') updateFitHint();
   if (id === 'calc') renderCalcs();
+  if (id === 'bms') renderBms();
 }
 
 // ------------------------------------------------------------------ тема
@@ -120,6 +126,10 @@ function bindDesigner() {
   $('#inStripMat').innerHTML = Object.entries(STRIP_MATERIALS).map(([k, m]) => `<option value="${k}">${esc(m.name)}</option>`).join('');
   bind('#inStripMat', 'stripMat', undefined, 'change');
   bind('#inStripW', 'stripW', num); bind('#inStripT', 'stripT', num); bind('#inStripL', 'stripL', int);
+  bind('#inBmsSide', 'bmsSide', undefined, 'change');
+  bind('#inLead', 'leadAttach', undefined, 'change');
+  bind('#inAnalysis', 'analysis', undefined, 'change');
+  $('#toBms').addEventListener('click', () => showTab('bms'));
 
   $('#cellSelect').addEventListener('change', (e) => { state.cellId = e.target.value; onCellChange(); });
   $('#presets').innerHTML = PRESETS.map(([s, p]) => `<button data-s="${s}" data-p="${p}" title="${s} послідовно × ${p} паралельно">${s}S${p}P</button>`).join('');
@@ -153,12 +163,13 @@ function bindDesigner() {
 }
 
 function syncInputs() {
-  const map = { '#inS': 'S', '#inP': 'P', '#inRows': 'rows', '#inGap': 'gap', '#inArr': 'arrangement', '#inSnake': 'snake', '#inRotate': 'rotate', '#inLabels': 'labels', '#inLoad': 'load', '#inMirror': 'mirror', '#inBalance': 'balance', '#inStripMat': 'stripMat', '#inStripW': 'stripW', '#inStripT': 'stripT', '#inStripL': 'stripL' };
+  const map = { '#inS': 'S', '#inP': 'P', '#inRows': 'rows', '#inGap': 'gap', '#inArr': 'arrangement', '#inSnake': 'snake', '#inRotate': 'rotate', '#inLabels': 'labels', '#inLoad': 'load', '#inMirror': 'mirror', '#inBalance': 'balance', '#inStripMat': 'stripMat', '#inStripW': 'stripW', '#inStripT': 'stripT', '#inStripL': 'stripL', '#inBmsSide': 'bmsSide', '#inLead': 'leadAttach', '#inAnalysis': 'analysis' };
   for (const [sel, key] of Object.entries(map)) {
     const el = $(sel);
     if (el.type === 'checkbox') el.checked = !!state[key]; else el.value = state[key];
   }
   syncFitInputs();
+  syncBmsInputs();
 }
 
 function setConfig(S, P, rows, extra = {}) {
@@ -192,86 +203,138 @@ function cellLabelsFromMatching(layout) {
   return labels;
 }
 
+const stripOpts = () => ({ material: state.stripMat, width: state.stripW, thickness: state.stripT, layers: state.stripL });
+let currentAnalysis = null;
+
+function buildLayout(cell) {
+  const rows = state.rows || autoRows(state.S, state.P, cell.shape, state.snake);
+  return generateLayout({
+    S: state.S, P: state.P, rows, arrangement: state.arrangement, snake: state.snake, gap: state.gap, cell,
+    rotate: state.rotate, bmsSide: state.bmsSide, leadAttach: state.leadAttach,
+  });
+}
+
+const groupPair = (busIndex) => `між групами ${busIndex} та ${busIndex + 1}`;
+function linkPlace(layout, a) {
+  const l = a.maxLink;
+  if (!l) return '';
+  const A = layout.cells[l.a];
+  if (l.bus === 0) return `на мінусовій шині (група 1), біля ряду ${A.row + 1}, стовпця ${A.col + 1}`;
+  if (l.bus === layout.S) return `на плюсовій шині (група ${layout.S}), біля ряду ${A.row + 1}, стовпця ${A.col + 1}`;
+  return `${l.series ? 'послідовна' : 'паралельна'} перемичка ${groupPair(l.bus)}, ряд ${A.row + 1}, стовпець ${A.col + 1}`;
+}
+
 function renderDesigner() {
   const cell = getCell();
   $('#cellInfo').textContent = cellSummary(cell);
   $('#rotateWrap').hidden = cell.shape === 'cyl';
   $$('#inArr option[value^="honeycomb"]').forEach((o) => (o.disabled = cell.shape !== 'cyl'));
   $('#inSnake').disabled = state.arrangement === 'honeycomb2' && cell.shape === 'cyl';
-  $('#inRows').placeholder = `авто (${autoRows(state.S, state.P, cell.shape)})`;
+  $('#inRows').placeholder = `авто (${autoRows(state.S, state.P, cell.shape, state.snake)})`;
 
-  const layout = generateLayout({
-    S: state.S, P: state.P, rows: state.rows || autoRows(state.S, state.P, cell.shape),
-    arrangement: state.arrangement, snake: state.snake, gap: state.gap, cell, rotate: state.rotate,
-  });
+  const layout = buildLayout(cell);
   currentLayout = layout;
   const stats = packStats(cell, state.S, state.P, { loadCurrent: state.load });
+  const analysis = layout.N <= 4000 ? analyzeCurrents(layout, cell, { load: state.load, strip: stripOpts() }) : { ok: false, reason: 'Завеликий пакет для розрахунку' };
+  currentAnalysis = analysis;
   const cellLabels = state.labels === 'capacity' ? cellLabelsFromMatching(layout) : null;
   const title = `${state.S}S${state.P}P · ${cell.name} · ${fmt(stats.vNom)} В ${fmt(stats.ah)} А·год`;
   currentSvg = renderPackSVG(layout, {
     mirrorBottom: state.mirror, labels: state.labels === 'capacity' && !cellLabels ? 'group' : state.labels,
-    showBalance: state.balance, cellLabels, title,
+    showBalance: state.balance, cellLabels, title, analysis: state.analysis && analysis.ok ? analysis : null,
   });
   $('#svgHost').innerHTML = currentSvg;
   applyZoom();
-  $('#schemeTitle').textContent = `Схема ${state.S}S${state.P}P — ${layout.rows}×${layout.cols}${layout.honey ? (layout.dense ? ', щільні стільники' : ', стільники') : ''}`;
+  const snakeName = { cols: '', rows: ', змійка по рядах', u: ', U-подібна' }[layout.snake] || '';
+  $('#schemeTitle').textContent = `Схема ${state.S}S${state.P}P — ${layout.rows}×${layout.cols}${layout.honey ? (layout.dense ? ', щільні стільники' : ', стільники') : ''}${snakeName}`;
 
   // попередження
   const warns = [...layout.warnings];
-  const strip = stripCalc({ material: state.stripMat, width: state.stripW, thickness: state.stripT, layers: state.stripL });
+  const strip = stripCalc(stripOpts());
   const perLink = state.S > 1 && layout.minSeries ? state.load / layout.minSeries : null;
-  if (cell.shape === 'cyl' && perLink && perLink > strip.ampacity * 1.05)
-    warns.push(`Струм через послідовну перемичку ≈ ${fmt(perLink)} А (найслабше місце — між групами ${layout.weakestBus} та ${layout.weakestBus + 1}, ${layout.minSeries} перемичок), а стрічка витримує ≈ ${fmt(strip.ampacity)} А. Додайте шарів, ширшу стрічку або мідну шину.`);
+  if (analysis.ok) {
+    if (cell.shape === 'cyl' && analysis.maxLinkRatio > 1.05)
+      warns.push(`Найнавантаженіша перемичка — ${linkPlace(layout, analysis)}: ${fmt(analysis.maxLink.I)} А при допустимих ≈ ${fmt(strip.ampacity)} А. `
+        + (analysis.maxLink.series && layout.buses[analysis.maxLink.bus].seriesLinks === 1
+          ? `Групи ${analysis.maxLink.bus} та ${analysis.maxLink.bus + 1} торкаються лише однією коміркою — весь струм іде через одну перемичку. Покладіть уздовж стику мідну шину або змініть кількість рядів.`
+          : 'Додайте шар стрічки, ширшу стрічку або мідь саме на цій ділянці.'));
+    if (analysis.maxCellRatio > 1)
+      warns.push(`Комірка #${analysis.maxCellId + 1} віддає ${fmt(analysis.maxCell, 2)} А — більше за допустимі ${cell.iMax} А через нерівномірний розподіл струму.`);
+    const wg = analysis.worstGroup;
+    if (wg && layout.P > 1 && wg.imbalance > 0.15)
+      warns.push(`Нерівномірний струм у групі ${wg.group + 1}: від ${fmt(wg.min, 2)} до ${fmt(wg.max, 2)} А (${fmt(wg.imbalance * 100, 0)}%). Комірки біля силових виводів старітимуть швидше — перенесіть виводи в центр групи, додайте шар стрічки або мідну шину.`);
+  } else if (cell.shape === 'cyl' && perLink && perLink > strip.ampacity * 1.05) {
+    warns.push(`Струм через послідовну перемичку ≈ ${fmt(perLink)} А (найслабше місце — ${groupPair(layout.weakestBus)}, ${layout.minSeries} перемичок), а стрічка витримує ≈ ${fmt(strip.ampacity)} А.`);
+  }
   if (stats.perCell && stats.perCell > cell.iMax)
     warns.push(`Струм на одну комірку ${fmt(stats.perCell)} А перевищує допустимий ${cell.iMax} А. Збільште P.`);
   if (state.labels === 'capacity' && !cellLabels)
     warns.push('Немає результату балансування для цієї конфігурації — розподіліть комірки на вкладці «Балансування комірок».');
   $('#warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
 
-  renderStats(cell, stats, layout, strip, perLink);
-  renderBom(cell, stats, layout);
-  renderSteps(cell, layout);
+  const plan = currentPlan(cell, layout);
+  renderStats(cell, stats, layout, strip, perLink, analysis, plan);
+  renderBom(cell, stats, layout, plan);
+  renderSteps(cell, layout, plan);
+  if ($('#tab-bms').classList.contains('active')) renderBms();
 }
 
-function renderStats(cell, st, layout, strip, perLink) {
+function renderStats(cell, st, layout, strip, perLink, a, plan) {
   const box = requiredBox(layout, cell, { margin: state.fit.margin, depthReserve: state.fit.depth });
+  const ok = a && a.ok;
   const cards = [
     ['Напруга', `${fmt(st.vNom)} В`, `${fmt(st.vMin)} – ${fmt(st.vMax)} В`],
     ['Ємність', `${fmt(st.ah, 2)} А·год`, `${st.N} комірок`],
     ['Енергія', `${fmt(st.wh, 0)} Вт·год`, st.whPerKg ? `${fmt(st.whPerKg, 0)} Вт·год/кг` : ''],
     ['Макс. струм', `${fmt(st.iMax, 0)} А`, `${fmt(st.pMax / 1000, 2)} кВт`],
-    ['Опір пакета', st.irPack ? `${fmt(st.irPack, st.irPack < 1 ? 3 : 1)} мОм` : '—', st.sag ? `просідання ${fmt(st.sag, 2)} В при ${fmt(st.loadCurrent)} А` : 'лише комірки'],
-    ['Струм на комірку', st.perCell ? `${fmt(st.perCell, 2)} А` : '—', st.cRate ? `${fmt(st.cRate, 2)}C` : '', st.perCell > cell.iMax ? 'bad' : st.perCell ? 'ok' : ''],
+    ok
+      ? ['Напруга під навантаженням', `${fmt(a.vTerm, 2)} В`, `просідання ${fmt(a.drop, 2)} В при ${fmt(a.load)} А`]
+      : ['Опір пакета', st.irPack ? `${fmt(st.irPack, st.irPack < 1 ? 3 : 1)} мОм` : '—', st.sag ? `просідання ${fmt(st.sag, 2)} В при ${fmt(st.loadCurrent)} А` : 'лише комірки'],
+    ok
+      ? ['Струм комірок', `${fmt(a.maxCell, 2)} А`, `макс.; середній ${fmt(a.load / layout.P, 2)} А (${fmt(st.cRate, 2)}C)`, a.maxCellRatio > 1 ? 'bad' : 'ok']
+      : ['Струм на комірку', st.perCell ? `${fmt(st.perCell, 2)} А` : '—', st.cRate ? `${fmt(st.cRate, 2)}C` : '', st.perCell > cell.iMax ? 'bad' : st.perCell ? 'ok' : ''],
+    ok && layout.P > 1
+      ? ['Розбаланс у групі', `${fmt(a.worstGroup.imbalance * 100, 1)}%`, `група ${a.worstGroup.group + 1}: ${fmt(a.worstGroup.min, 2)}–${fmt(a.worstGroup.max, 2)} А`, a.worstGroup.imbalance > 0.15 ? 'bad' : 'ok']
+      : null,
+    cell.shape === 'cyl'
+      ? (ok
+        ? ['Найгарячіша перемичка', `${fmt(a.maxLink?.I ?? 0, 1)} А`, `${fmt(a.maxLinkRatio * 100, 0)}% від ≈ ${fmt(strip.ampacity, 1)} А`, a.maxLinkRatio > 1.05 ? 'bad' : 'ok']
+        : ['Перемичка', perLink ? `${fmt(perLink, 1)} А` : '—', `стрічка витримує ≈ ${fmt(strip.ampacity, 1)} А`, perLink && perLink > strip.ampacity * 1.05 ? 'bad' : perLink ? 'ok' : ''])
+      : ['Шина між групами', perLink ? `${fmt(perLink, 1)} А` : '—', 'струм через найслабше з’єднання'],
+    ok
+      ? ['Тепло при навантаженні', `${fmt(a.cellLoss + a.stripLoss, 1)} Вт`, `комірки ${fmt(a.cellLoss, 1)} Вт, перемички ${fmt(a.stripLoss, 1)} Вт`]
+      : ['Тепло при навантаженні', st.heat ? `${fmt(st.heat, 1)} Вт` : '—', 'втрати на опорі комірок'],
     ['Маса', `${fmt(st.massEst / 1000, 2)} кг`, `комірки ${fmt(st.cellsMass / 1000, 2)} кг`],
     ['Розмір блоку', `${fmt(layout.width, 0)}×${fmt(layout.height, 0)}`, `× ${fmt(cell.h, 0)} мм (корпус від ${fmt(box.a, 0)}×${fmt(box.b, 0)}×${fmt(box.depth, 0)})`],
-    cell.shape === 'cyl'
-      ? ['Перемичка', perLink ? `${fmt(perLink, 1)} А` : '—', `стрічка витримує ≈ ${fmt(strip.ampacity, 1)} А`, perLink && perLink > strip.ampacity * 1.05 ? 'bad' : perLink ? 'ok' : '']
-      : ['Шина між групами', perLink ? `${fmt(perLink, 1)} А` : '—', 'струм через найслабше з’єднання'],
-    ['Тепло при навантаженні', st.heat ? `${fmt(st.heat, 1)} Вт` : '—', 'втрати на опорі комірок'],
-  ];
+    ['BMS', `${plan.channels}S · ${plan.bmsCurrent} А`, `запобіжник ${fmt(plan.fuse, 1)} А, заряд ${fmt(plan.pack.charge, 1)} В`, plan.checks.some((c) => c.level === 'bad') ? 'bad' : ''],
+  ].filter(Boolean);
   $('#statsCards').innerHTML = cards.map(([k, v, s, cls = '']) =>
     `<div class="card ${cls}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s || ''}</div></div>`).join('');
 }
 
-function renderBom(cell, st, layout) {
+function renderBom(cell, st, layout, plan) {
   const stripM = (layout.stripLength + layout.linkCount * 6) / 1000 * state.stripL;
   const cyl = cell.shape === 'cyl';
+  const pw = plan.power.recommended;
   const rows = [
     [`Комірка ${cell.name}`, st.N, 'шт'],
     cyl ? ['Тримачі (холдери) комірок', `${st.N * 2}`, 'шт (верх+низ)'] : ['Шини/busbar', layout.linkCount, 'шт'],
     cyl ? [`Стрічка ${STRIP_MATERIALS[state.stripMat].name} ${state.stripW}×${state.stripT} мм`, fmt(stripM * 1.2, 2), 'м (з запасом 20%)'] : null,
     cyl ? ['Ізоляційні кільця (fish paper) на «+»', st.N, 'шт'] : null,
-    [`BMS ${state.S}S, ${cell.chem}, тривалий струм ≥ ${st.bmsCurrent} А`, 1, 'шт'],
-    ['Балансувальні дроти (B0…B' + state.S + ')', st.balanceWires, 'шт'],
-    [`Силовий дріт (див. калькулятор)`, 2, 'шт'],
-    ['Запобіжник на P+', 1, `шт, ≈ ${Math.ceil(st.bmsCurrent * 1.1)} А`],
-    [`Зарядний пристрій ${fmt(st.chargerVoltage, 1)} В (CC/CV)`, 1, 'шт'],
+    [`BMS ${plan.channels}S ${cell.chem}, ${BMS_PORTS[plan.port].split(' (')[0].toLowerCase()}, ≥ ${plan.bmsCurrent} А`, 1, 'шт'],
+    [`Балансувальні дроти ${plan.balanceAwg}–24 AWG (B0…B${state.S})`, st.balanceWires, `шт, ≈ ${fmt(plan.balanceLength / 1000, 2)} м разом`],
+    [`Силовий дріт ${pw ? `${pw.awg} AWG (${pw.mm2} мм²)` : '—'}`, fmt(plan.leadLen * 2 * 1.2, 2), 'м (червоний + чорний)'],
+    [`Запобіжник на P+`, 1, `шт, ${fmt(plan.fuse, 1)} А`],
+    plan.sw ? ['Вимикач силового кола', 1, `шт, ≥ ${fmt(plan.fuse, 0)} А DC`] : null,
+    plan.precharge ? ['Резистор передзаряду ~100 Ом 5 Вт + кнопка', 1, 'компл.'] : null,
+    plan.ntc ? ['Датчик температури NTC 10 кОм', plan.ntc, 'шт'] : null,
+    [`Зарядний пристрій ${fmt(plan.pack.charge, 1)} В CC/CV, ${fmt(plan.chargeA, 1)} А`, 1, 'шт'],
     ['Термоусадка / корпус, ізоляційний картон', 1, 'компл.'],
   ].filter(Boolean);
   $('#bomTable').innerHTML = `<thead><tr><th>Позиція</th><th class="num">К-сть</th><th>Од.</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r[0])}</td><td class="num">${r[1]}</td><td>${esc(r[2])}</td></tr>`).join('')}</tbody>`;
 }
 
-function renderSteps(cell, layout) {
+function renderSteps(cell, layout, plan) {
   const S = layout.S;
   const cyl = cell.shape === 'cyl';
   const steps = [
@@ -281,11 +344,94 @@ function renderSteps(cell, layout) {
     `Приваріть перемички на ${cyl ? 'верхній стороні' : 'клемах'}: шини B1, B3, B5… (${Math.ceil((S) / 2)} шт).`,
     cyl ? `Переверніть блок і приваріть нижні шини B0, B2, B4… згідно з «Вигляд знизу».` : `Встановіть шини B0, B2, B4…`,
     `Перевірте мультиметром напругу кожної групи та наростання напруги між B0 та кожним Bn (≈ n × ${cell.vNom} В).`,
-    `Під'єднайте балансувальні дроти BMS у порядку B0 → B${S}. Спершу — B0 (мінус), далі по зростанню.`,
-    `Силові виводи: P− до BMS (B−), P+ через запобіжник до виходу. Заізолюйте блок.`,
+    `Приваріть силові виводи в позначених точках P− та P+ (${layout.leadAttach === 'center' ? 'центр крайніх груп' : 'біля BMS'}), дріт ${plan.power.recommended ? plan.power.recommended.awg + ' AWG' : 'див. вкладку BMS'}.`,
+    `Підключіть BMS за вкладкою «Підключення BMS»: B− → балансувальні B0…B${S} → роз'єм → P−${plan.port === 'separate' ? '/C−' : ''}. Запобіжник ${fmt(plan.fuse, 1)} А на P+.`,
     `Перший заряд — малим струмом під наглядом, перевірте балансування груп.`,
   ];
   $('#assemblySteps').innerHTML = steps.map((s) => `<li>${esc(s)}</li>`).join('');
+}
+
+// ------------------------------------------------------------------ BMS
+function currentPlan(cell = getCell(), layout = currentLayout) {
+  return bmsPlan(cell, layout, state.bms, state.load);
+}
+let currentBmsSvg = '';
+
+function syncBmsInputs() {
+  const b = state.bms;
+  $('#bmsType').value = b.type; $('#bmsPort').value = b.port;
+  $('#bmsCh').value = b.channels || ''; $('#bmsI').value = b.current || '';
+  $('#bmsChA').value = b.chargeA || ''; $('#bmsBal').value = b.balanceA;
+  $('#bmsNtc').value = b.ntc; $('#bmsLead').value = b.leadLen;
+  $('#bmsSw').checked = b.sw; $('#bmsPre').checked = b.precharge;
+  $('#bmsSide2').value = state.bmsSide; $('#bmsLead2').value = state.leadAttach;
+}
+
+function bindBms() {
+  $('#bmsType').innerHTML = Object.entries(BMS_TYPES).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  $('#bmsPort').innerHTML = Object.entries(BMS_PORTS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  const read = () => {
+    const b = state.bms;
+    b.type = $('#bmsType').value; b.port = $('#bmsPort').value;
+    b.channels = Math.floor(num($('#bmsCh'))); b.current = num($('#bmsI'));
+    b.chargeA = num($('#bmsChA')); b.balanceA = num($('#bmsBal'));
+    b.ntc = Math.max(0, Math.min(6, Math.floor(num($('#bmsNtc'))))); b.leadLen = num($('#bmsLead'));
+    b.sw = $('#bmsSw').checked; b.precharge = $('#bmsPre').checked;
+    state.bmsSide = $('#bmsSide2').value; state.leadAttach = $('#bmsLead2').value;
+    syncInputs(); renderDesigner(); renderBms(); save();
+  };
+  $$('#tab-bms aside input, #tab-bms aside select').forEach((el) => el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', read));
+  $('#bmsSvgBtn').addEventListener('click', () => download(`bms-${state.S}S${state.P}P.svg`, currentBmsSvg, 'image/svg+xml'));
+  $('#bmsPngBtn').addEventListener('click', async () => {
+    try { download(`bms-${state.S}S${state.P}P.png`, await svgToPng(currentBmsSvg, 2), 'image/png'); } catch { toast('Не вдалося створити PNG'); }
+  });
+  $('#bmsToDesigner').addEventListener('click', () => showTab('designer'));
+}
+
+function renderBms() {
+  const cell = getCell();
+  const layout = currentLayout;
+  const plan = currentPlan(cell, layout);
+  $('#bmsCh').placeholder = `як S (${layout.S})`;
+  $('#bmsI').placeholder = `авто (${plan.recCurrent})`;
+  $('#bmsChA').placeholder = `авто (${fmt(plan.chargeA, 1)})`;
+  $('#bmsCfg').textContent = `${layout.S}S${layout.P}P, ${cell.name}, навантаження ${fmt(state.load)} А`;
+  currentBmsSvg = renderBmsSVG(plan, cell, state.load);
+  $('#bmsHost').innerHTML = currentBmsSvg;
+
+  const icon = { ok: '✔', warn: '⚠', bad: '✘' };
+  $('#bmsChecks').innerHTML = plan.checks.map((c) => `<li class="chk ${c.level}"><span>${icon[c.level]}</span>${esc(c.text)}</li>`).join('');
+
+  $('#bmsWires').innerHTML = '<thead><tr><th>Дріт</th><th>Що з\'єднує</th><th>Куди приварити</th><th class="num">Від B0, В</th><th class="num">Довжина</th></tr></thead><tbody>'
+    + plan.wires.map((w) => `<tr><td><span class="swatch" style="background:${w.color}"></span><b>${w.name}</b></td><td>${esc(w.role)}</td><td>${esc(w.where)}</td>`
+      + `<td class="num">${fmt(w.vMin, 2)} / <b>${fmt(w.vNom, 2)}</b> / ${fmt(w.vMax, 2)}</td><td class="num">≈ ${w.length} мм</td></tr>`).join('')
+    + (plan.unused ? `<tr class="dim"><td colspan="5">Невикористані канали B${layout.S + 1}…B${plan.channels}: ${plan.type === 'smart' ? `зазвичай з'єднуються з B${layout.S} — перевірте інструкцію BMS` : 'апаратна BMS має відповідати S'}</td></tr>` : '')
+    + '</tbody>';
+
+  const p = plan.profile, k = layout.S;
+  const row = (name, v, hint = '') => `<tr><td>${name}</td><td class="num">${fmt(v, 3)} В</td><td class="num">${fmt(v * k, 2)} В</td><td class="hint-cell">${hint}</td></tr>`;
+  $('#bmsProt').innerHTML = '<thead><tr><th>Параметр</th><th class="num">Комірка</th><th class="num">Пакет</th><th></th></tr></thead><tbody>'
+    + row('Напруга заряду (CV)', p.charge, 'налаштування зарядного пристрою')
+    + row('Захист від перезаряду (OVP)', p.ovp, 'відключення заряду')
+    + row('Відновлення після OVP', p.ovpr)
+    + row('Захист від перерозряду (UVP)', p.uvp, 'відключення розряду')
+    + row('Відновлення після UVP', p.uvpr)
+    + row('Початок балансування', p.balStart, `при різниці > ${p.balDelta} мВ`)
+    + row('Напруга зберігання', p.storage, 'для тривалого зберігання')
+    + `<tr><td>Захист від перевантаження (OCP)</td><td class="num">—</td><td class="num">≤ ${fmt(Math.min(plan.bmsCurrent, plan.packIMax), 0)} А</td><td class="hint-cell">тривалий розряд</td></tr>`
+    + `<tr><td>Струм заряду</td><td class="num">—</td><td class="num">${fmt(plan.chargeA, 1)} А</td><td class="hint-cell">${fmt(plan.chargeC, 2)}C</td></tr>`
+    + '</tbody>';
+  $('#bmsProtNote').textContent = p.known ? `Профіль ${cell.chem}. Значення консервативні — для більшого ресурсу.` : 'Хімія невідома — пороги розраховано з даташиту комірки.';
+
+  const pw = plan.power.recommended, cw = plan.chargeWire.recommended;
+  $('#bmsPower').innerHTML = `<dl>
+    <dt>Запобіжник P+</dt><dd>${fmt(plan.fuse, 1)} А</dd>
+    <dt>Силові дроти (B−, P−, P+)</dt><dd>${pw ? `${pw.awg} AWG · ${pw.mm2} мм² · падіння ${fmt(pw.dropPct, 2)}%` : 'потрібні шини'}</dd>
+    <dt>${plan.port === 'separate' ? 'Дріт C− і зарядного порту' : 'Дроти зарядного порту'}</dt><dd>${cw ? `${cw.awg} AWG · ${cw.mm2} мм²` : '—'}</dd>
+    <dt>Балансувальні дроти</dt><dd>${plan.balanceAwg}–24 AWG, разом ≈ ${fmt(plan.balanceLength / 1000, 2)} м</dd>
+    <dt>Зарядний пристрій</dt><dd>${fmt(plan.pack.charge, 1)} В CC/CV, ${fmt(plan.chargeA, 1)} А</dd>
+  </dl>`;
+  $('#bmsSteps').innerHTML = plan.steps.map((s) => `<li>${esc(s)}</li>`).join('');
 }
 
 // ------------------------------------------------------------------ вписування
@@ -397,7 +543,7 @@ function selectFit(i) {
   const r = fitRows[i];
   const cell = getCell();
   const L = r.layout;
-  const layout = generateLayout({ S: r.layerS || r.S, P: r.P, rows: r.rows, arrangement: L.arrangement, snake: 'cols', gap: state.fit.gap, cell, rotate: L.rotate });
+  const layout = generateLayout({ S: r.layerS || r.S, P: r.P, rows: r.rows, arrangement: L.arrangement, snake: 'cols', gap: state.fit.gap, cell, rotate: L.rotate, bmsSide: state.bmsSide });
   $('#fitHost').innerHTML = renderFitSVG({
     planeA: L.planeA, planeB: L.planeB, margin: state.fit.margin, aAxis: L.aAxis, bAxis: L.bAxis,
     layout, layers: r.layers, depth: L.depth, cellLen: cell.h,
@@ -596,6 +742,7 @@ bindFit();
 bindCalcs();
 bindMatch();
 bindCells();
+bindBms();
 syncInputs();
 renderAll();
 runFit();

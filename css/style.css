@@ -143,6 +143,22 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .result dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
 
 .steps { margin: 0; padding-left: 20px; font-size: 13px; }
+button.wide { width: 100%; margin-top: 4px; }
+.btn-row.tight { margin-top: 0; flex: 0 0 auto; }
+.btn-row.tight > * { flex: 0 0 auto; }
+h3.first { margin-top: 0; }
+.schem-wrap svg { width: 100%; height: auto; min-width: 640px; }
+.checks { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.checks li { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.checks li:last-child { border-bottom: 0; }
+.checks li span { width: 16px; flex: 0 0 16px; font-weight: 700; }
+.checks .ok span { color: var(--ok); }
+.checks .warn span { color: var(--warn); }
+.checks .bad span { color: var(--bad); }
+.checks .bad { color: var(--bad); }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; border: 1px solid var(--border); }
+.tbl td.hint-cell { color: var(--muted); font-size: 12px; white-space: normal; }
+#bmsWires td:nth-child(2), #bmsWires td:nth-child(3) { white-space: normal; min-width: 160px; }
 .steps li { margin-bottom: 6px; }
 
 .groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin: 10px 0; }
@@ -167,7 +183,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 }
 
 @media print {
-  .topbar, .controls, .foot, .zoom, #warnings, .btn-row, .tab-panel:not(#tab-designer) { display: none !important; }
+  .topbar, .controls, .foot, .zoom, #warnings, .btn-row, .tab-panel:not(.active) { display: none !important; }
   main { padding: 0; }
   .layout-2col { display: block; }
   .panel { box-shadow: none; border: 0; padding: 4px; break-inside: avoid; }
