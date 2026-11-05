@@ -1,7 +1,8 @@
 import { BUILTIN_CELLS, validateCell } from './cells.js';
 import { generateLayout, packStats, autoRows } from './layout.js';
 import { bestConfigs, checkConfig, requiredBox } from './fit.js';
-import { renderPackSVG, renderFitSVG, svgToPng } from './render.js';
+import { renderPackSVG, renderFitSVG, svgToPng, VIEW_MODES } from './render.js';
+import { buildScene3D } from './scene3d.js';
 import { STRIP_MATERIALS, stripCalc, wireCalc, runtimeCalc, sizePack, parseCellList, balanceCells } from './tools.js';
 import { analyzeCurrents } from './analysis.js';
 import { bmsPlan, BMS_TYPES, BMS_PORTS } from './bms.js';
@@ -21,7 +22,9 @@ const state = {
   S: 10, P: 4, rows: '', gap: 0.5, arrangement: 'grid', snake: 'cols', rotate: false,
   labels: 'group', load: 20, mirror: true, balance: true,
   stripMat: 'nickel', stripW: 8, stripT: 0.15, stripL: 1,
-  bmsSide: 'right', leadAttach: 'near', analysis: true,
+  bmsSide: 'right', leadAttach: 'near',
+  viewMode: 'scheme', step: 'all',
+  v3d: { explode: 0, strips: true, wires: true, labels: true, enclosure: false, color: 'type' },
   zoom: 1,
   bms: { type: 'hardware', port: 'common', channels: 0, current: 0, chargeA: 0, balanceA: 0.05, ntc: 1, sw: true, precharge: false, leadLen: 0.3 },
   matching: null, // { S, P, groups: [[cap...]] }
@@ -36,7 +39,7 @@ function load() {
 }
 function mergeState(obj) {
   if (!obj || typeof obj !== 'object') return;
-  for (const k of Object.keys(state)) if (k in obj) state[k] = k === 'fit' || k === 'bms' ? { ...state[k], ...obj[k] } : obj[k];
+  for (const k of Object.keys(state)) if (k in obj) state[k] = k === 'fit' || k === 'bms' || k === 'v3d' ? { ...state[k], ...obj[k] } : obj[k];
 }
 let saveTimer;
 function save() {
@@ -73,6 +76,7 @@ function showTab(id) {
   if (id === 'fit') updateFitHint();
   if (id === 'calc') renderCalcs();
   if (id === 'bms') renderBms();
+  if (viewer) { if (id === 'designer' && state.viewMode === '3d') viewer.start(); else viewer.stop(); }
 }
 
 // ------------------------------------------------------------------ тема
@@ -122,14 +126,25 @@ function bindDesigner() {
   bind('#inLabels', 'labels', undefined, 'change');
   bind('#inLoad', 'load', num);
   bind('#inMirror', 'mirror', undefined, 'change');
-  bind('#inBalance', 'balance', undefined, 'change');
   $('#inStripMat').innerHTML = Object.entries(STRIP_MATERIALS).map(([k, m]) => `<option value="${k}">${esc(m.name)}</option>`).join('');
   bind('#inStripMat', 'stripMat', undefined, 'change');
   bind('#inStripW', 'stripW', num); bind('#inStripT', 'stripT', num); bind('#inStripL', 'stripL', int);
   bind('#inBmsSide', 'bmsSide', undefined, 'change');
   bind('#inLead', 'leadAttach', undefined, 'change');
-  bind('#inAnalysis', 'analysis', undefined, 'change');
   $('#toBms').addEventListener('click', () => showTab('bms'));
+  $$('#modeSeg button').forEach((b) => b.addEventListener('click', () => { state.viewMode = b.dataset.mode; renderDesigner(); save(); }));
+  $$('#stepSeg button').forEach((b) => b.addEventListener('click', () => { state.step = b.dataset.step; renderDesigner(); save(); }));
+  $$('.v3d-views button').forEach((b) => b.addEventListener('click', () => viewer?.setView(b.dataset.view)));
+  const v3dBind = (sel, key, prop = 'checked') => {
+    const el = $(sel);
+    el[prop] = state.v3d[key];
+    el.addEventListener(prop === 'checked' ? 'change' : 'input', () => {
+      state.v3d[key] = prop === 'checked' ? el.checked : prop === 'valueAsNumber' ? el.valueAsNumber : el.value;
+      renderDesigner(); save();
+    });
+  };
+  v3dBind('#v3dStrips', 'strips'); v3dBind('#v3dWires', 'wires'); v3dBind('#v3dLabels', 'labels'); v3dBind('#v3dBox', 'enclosure');
+  v3dBind('#v3dColor', 'color', 'value'); v3dBind('#v3dExplode', 'explode', 'valueAsNumber');
 
   $('#cellSelect').addEventListener('change', (e) => { state.cellId = e.target.value; onCellChange(); });
   $('#presets').innerHTML = PRESETS.map(([s, p]) => `<button data-s="${s}" data-p="${p}" title="${s} послідовно × ${p} паралельно">${s}S${p}P</button>`).join('');
@@ -142,9 +157,12 @@ function bindDesigner() {
     state.zoom = d === 0 ? 1 : Math.max(0.3, Math.min(6, state.zoom * (d > 0 ? 1.25 : 0.8)));
     applyZoom(); save();
   }));
-  $('#btnSvg').addEventListener('click', () => download(`${fileBase()}.svg`, currentSvg, 'image/svg+xml'));
+  $('#btnSvg').addEventListener('click', () => download(`${fileBase()}-${state.viewMode}.svg`, currentSvg, 'image/svg+xml'));
   $('#btnPng').addEventListener('click', async () => {
-    try { download(`${fileBase()}.png`, await svgToPng(currentSvg, 1), 'image/png'); } catch { toast('Не вдалося створити PNG'); }
+    try {
+      const blob = state.viewMode === '3d' && viewer ? await viewer.png() : await svgToPng(currentSvg, 1);
+      download(`${fileBase()}-${state.viewMode}.png`, blob, 'image/png');
+    } catch { toast('Не вдалося створити PNG'); }
   });
   $('#btnPrint').addEventListener('click', () => window.print());
   $('#btnSave').addEventListener('click', () => {
@@ -163,7 +181,7 @@ function bindDesigner() {
 }
 
 function syncInputs() {
-  const map = { '#inS': 'S', '#inP': 'P', '#inRows': 'rows', '#inGap': 'gap', '#inArr': 'arrangement', '#inSnake': 'snake', '#inRotate': 'rotate', '#inLabels': 'labels', '#inLoad': 'load', '#inMirror': 'mirror', '#inBalance': 'balance', '#inStripMat': 'stripMat', '#inStripW': 'stripW', '#inStripT': 'stripT', '#inStripL': 'stripL', '#inBmsSide': 'bmsSide', '#inLead': 'leadAttach', '#inAnalysis': 'analysis' };
+  const map = { '#inS': 'S', '#inP': 'P', '#inRows': 'rows', '#inGap': 'gap', '#inArr': 'arrangement', '#inSnake': 'snake', '#inRotate': 'rotate', '#inLabels': 'labels', '#inLoad': 'load', '#inMirror': 'mirror', '#inStripMat': 'stripMat', '#inStripW': 'stripW', '#inStripT': 'stripT', '#inStripL': 'stripL', '#inBmsSide': 'bmsSide', '#inLead': 'leadAttach' };
   for (const [sel, key] of Object.entries(map)) {
     const el = $(sel);
     if (el.type === 'checkbox') el.checked = !!state[key]; else el.value = state[key];
@@ -239,12 +257,29 @@ function renderDesigner() {
   currentAnalysis = analysis;
   const cellLabels = state.labels === 'capacity' ? cellLabelsFromMatching(layout) : null;
   const title = `${state.S}S${state.P}P · ${cell.name} · ${fmt(stats.vNom)} В ${fmt(stats.ah)} А·год`;
-  currentSvg = renderPackSVG(layout, {
-    mirrorBottom: state.mirror, labels: state.labels === 'capacity' && !cellLabels ? 'group' : state.labels,
-    showBalance: state.balance, cellLabels, title, analysis: state.analysis && analysis.ok ? analysis : null,
-  });
-  $('#svgHost').innerHTML = currentSvg;
-  applyZoom();
+  const mode = ['scheme', 'assembly', 'currents', 'wiring', '3d'].includes(state.viewMode) ? state.viewMode : 'scheme';
+  $$('#modeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+  $$('#stepSeg button').forEach((b) => b.classList.toggle('active', b.dataset.step === state.step));
+  $('#stepRow').hidden = mode !== 'assembly';
+  $('#modeHint').textContent = mode === '3d'
+    ? 'Обертання — ліва кнопка миші або один палець, зсув — права кнопка або два пальці, масштаб — коліщатко. Наведіть на комірку, щоб побачити деталі.'
+    : VIEW_MODES[mode] + (mode === 'currents' && !analysis.ok ? ` (${analysis.reason})` : '');
+  $('#svgWrap').hidden = mode === '3d';
+  $('#view3d').hidden = mode !== '3d';
+  $('.zoom').hidden = mode === '3d';
+  $('#btnSvg').disabled = mode === '3d';
+  if (mode === '3d') {
+    render3D(cell, layout, analysis);
+  } else {
+    viewer?.stop();
+    currentSvg = renderPackSVG(layout, {
+      mode, step: state.step, mirrorBottom: state.mirror,
+      labels: state.labels === 'capacity' && !cellLabels ? 'group' : state.labels,
+      cellLabels, title, analysis,
+    });
+    $('#svgHost').innerHTML = currentSvg;
+    applyZoom();
+  }
   const snakeName = { cols: '', rows: ', змійка по рядах', u: ', U-подібна' }[layout.snake] || '';
   $('#schemeTitle').textContent = `Схема ${state.S}S${state.P}P — ${layout.rows}×${layout.cols}${layout.honey ? (layout.dense ? ', щільні стільники' : ', стільники') : ''}${snakeName}`;
 
@@ -349,6 +384,49 @@ function renderSteps(cell, layout, plan) {
     `Перший заряд — малим струмом під наглядом, перевірте балансування груп.`,
   ];
   $('#assemblySteps').innerHTML = steps.map((s) => `<li>${esc(s)}</li>`).join('');
+}
+
+// ------------------------------------------------------------------ 3D
+let viewer = null;
+let viewerLoading = null;
+let render3DSeq = 0;
+
+function ensureViewer() {
+  if (viewer) return Promise.resolve(viewer);
+  if (!viewerLoading) {
+    viewerLoading = import('./view3d.js')
+      .then((m) => m.createViewer($('#v3dHost'), $('#v3dTip')))
+      .then((v) => (viewer = v))
+      .catch((e) => { viewerLoading = null; throw e; });
+  }
+  return viewerLoading;
+}
+
+async function render3D(cell, layout, analysis) {
+  const seq = ++render3DSeq;
+  const v = state.v3d;
+  $('#v3dExplode').value = v.explode;
+  const desc = buildScene3D(layout, cell, {
+    strip: stripOpts(), analysis, stripColor: v.color, explode: v.explode,
+    strips: v.strips, wires: v.wires, labels: v.labels, enclosure: v.enclosure,
+    box: { margin: state.fit.margin, depthReserve: state.fit.depth },
+  });
+  const info = (it) => {
+    let t = `Комірка #${it.id + 1} · група ${it.group + 1}, позиція ${it.k + 1} · «${it.plusTop ? '+' : '−'}» догори`;
+    if (analysis?.ok) t += ` · ${fmt(analysis.cellI[it.id], 2)} А`;
+    return t;
+  };
+  const msg = $('#v3dMsg');
+  if (!viewer) msg.textContent = 'Завантаження 3D…';
+  try {
+    const vw = await ensureViewer();
+    if (seq !== render3DSeq || state.viewMode !== '3d') return;
+    vw.update(desc, info);
+    if ($('#tab-designer').classList.contains('active')) vw.start();
+    msg.textContent = v.color === 'current' && !analysis?.ok ? `Колір за струмом недоступний: ${analysis?.reason || ''}` : '';
+  } catch (e) {
+    msg.textContent = `Не вдалося запустити 3D-перегляд (потрібна підтримка WebGL): ${e.message}`;
+  }
 }
 
 // ------------------------------------------------------------------ BMS
