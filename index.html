@@ -92,6 +92,7 @@
         <div class="row2">
           <label>BMS розташована
             <select id="inBmsSide">
+              <option value="auto">Автоматично</option>
               <option value="right">Праворуч</option>
               <option value="left">Ліворуч</option>
               <option value="top">Зверху</option>
@@ -105,6 +106,7 @@
             </select>
           </label>
         </div>
+        <p class="hint side-hint" id="bmsSideHint"></p>
         <button id="toBms" class="ghost wide" type="button">Налаштування BMS і схема підключення →</button>
 
         <h3>Перемички</h3>
@@ -230,6 +232,7 @@
         <div class="row2">
           <label>BMS
             <select id="bmsSide2">
+              <option value="auto">Автоматично</option>
               <option value="right">Праворуч</option>
               <option value="left">Ліворуч</option>
               <option value="top">Зверху</option>
@@ -243,6 +246,7 @@
             </select>
           </label>
         </div>
+        <p class="hint side-hint" id="bmsSideHint2"></p>
         <p class="hint">Порожні поля — автоматичний підбір за струмом навантаження та ємністю.</p>
         <button id="bmsToDesigner" class="ghost wide" type="button">← До фізичної схеми</button>
       </aside>

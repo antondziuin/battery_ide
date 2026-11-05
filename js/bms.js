@@ -1,6 +1,10 @@
 // Підбір і підключення BMS: пороги захисту, балансувальні дроти, запобіжник, перетини, перевірки.
 
 import { wireCalc } from './tools.js';
+import { harnessRoutes, polylineLength, routeConflicts, wireColor } from './routing.js';
+import { BMS_SIDE_NAMES } from './layout.js';
+
+export { wireColor };
 
 // Рекомендовані налаштування на одну комірку, В. Значення консервативні (на ресурс), а не граничні.
 export const CHEM_PROFILES = {
@@ -23,11 +27,6 @@ const FUSES = [1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 100,
 const BMS_RATINGS = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500];
 const roundUp = (list, v) => list.find((x) => x >= v - 1e-9) ?? Math.ceil(v);
 
-// Палітра балансувальних дротів (умовна). B0 — завжди чорний.
-const WIRE_PALETTE = ['#e03131', '#f08c00', '#d4a017', '#2f9e44', '#1c7ed6', '#7048e8', '#c2255c', '#0c8599', '#8d5524', '#5c940d', '#ae3ec9', '#495057'];
-export function wireColor(k) {
-  return k === 0 ? '#1d232b' : WIRE_PALETTE[(k - 1) % WIRE_PALETTE.length];
-}
 
 /** Налаштування захисту для комірки з урахуванням її даташиту. */
 export function protectionProfile(cell) {
@@ -88,7 +87,10 @@ export function bmsPlan(cell, layout, cfg, load) {
   const power = wireCalc({ current: fuse, length: leadLen, voltage: vNom, maxDropPct: 2 });
   const chargeWire = wireCalc({ current: chargeA * 1.25, length: leadLen, voltage: vNom, maxDropPct: 3 });
 
-  const pitch = Math.max(layout.pitchX, layout.pitchY);
+  const harness = harnessRoutes(layout, { gap: 15, thick: 4 });
+  const routeLen = Object.fromEntries(harness.routes.map((r) => [r.name, polylineLength(r.points)]));
+  const drop = layout.shape === 'cyl' ? cell.h / 2 : 10; // спуск по боковій стінці до роз'єму
+  const conflicts = routeConflicts(harness.routes);
   const wires = [];
   for (let k = 0; k <= S; k++) {
     const bus = layout.buses[k];
@@ -105,13 +107,22 @@ export function bmsPlan(cell, layout, cfg, load) {
       where: `група ${groupNo} «${terminal}», ряд ${c.row + 1}, стовпець ${c.col + 1}, ${sideName}`,
       cellId: c.id,
       vMin: k * cell.vMin, vNom: k * cell.vNom, vMax: k * cell.vMax,
-      length: Math.round((bus.tapDist + 60 + pitch) / 10) * 10, // мм, з запасом на укладання
+      length: Math.round((routeLen[`B${k}`] + drop + 40) / 10) * 10, // мм, за трасою + запас
     });
   }
   const balanceLength = wires.reduce((s, w) => s + w.length, 0);
 
   const checks = [];
   const add = (level, text) => checks.push({ level, text });
+  const h = layout.harness || { quality: 'clean' };
+  const sideName = BMS_SIDE_NAMES[layout.bmsSide];
+  const bestHint = h.bestSide && h.bestSide !== layout.bmsSide && h.alternatives?.[h.bestSide]?.quality === 'clean'
+    ? ` Без спільних трас — якщо поставити BMS ${BMS_SIDE_NAMES[h.bestSide]} (або «Автоматично»).` : '';
+  if (conflicts.crossings.length)
+    add('bad', `Дроти до BMS перетинаються (${conflicts.crossings.length}). Змініть сторону BMS або розкладку.${bestHint}`);
+  else if (conflicts.overlaps.length)
+    add('warn', `Дроти розведено без перетинів, але ${conflicts.overlaps.length} пар іде спільним джгутом поверх пакета (BMS ${sideName}).${bestHint}`);
+  else add('ok', `Дроти до BMS розведено без перетинів і накладань (BMS ${sideName}).`);
   if (channels < S) add('bad', `BMS на ${channels}S не підходить для ${S}S — потрібна BMS щонайменше на ${S} каналів.`);
   else if (channels > S && cfg.type === 'hardware')
     add('bad', `Апаратна BMS на ${channels}S розрахована саме на ${channels} груп. Для ${S}S купуйте BMS на ${S}S або розумну BMS з налаштуванням кількості комірок.`);
@@ -169,7 +180,7 @@ export function bmsPlan(cell, layout, cfg, load) {
     },
     bmsCurrent, recCurrent, chargeA, chargeC, balanceA, ntc, leadLen,
     fuse, power, chargeWire, sw: !!cfg.sw, precharge: !!cfg.precharge,
-    wires, balanceLength, balanceAwg: balanceA > 1 ? 20 : 22,
+    wires, balanceLength, balanceAwg: balanceA > 1 ? 20 : 22, harness, conflicts,
     checks, steps, packIMax, ah, vNom,
   };
 }

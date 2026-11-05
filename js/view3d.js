@@ -156,8 +156,14 @@ export async function createViewer(host, tooltip) {
     // дроти
     for (const it of desc.items) {
       if (it.kind !== 'wire') continue;
-      const curve = new THREE.CatmullRomCurve3(it.points.map((p) => new THREE.Vector3(...p)), false, 'centripetal');
-      const tube = keep(new THREE.TubeGeometry(curve, 48, it.radius, 8, false));
+      const pts = it.points.map((p) => new THREE.Vector3(...p));
+      let curve;
+      if (it.polyline) {
+        // ламана траса: точно повторює 2D-розводку (без згладжування, що могло б дати перехльост)
+        curve = new THREE.CurvePath();
+        for (let i = 0; i < pts.length - 1; i++) curve.add(new THREE.LineCurve3(pts[i], pts[i + 1]));
+      } else curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+      const tube = keep(new THREE.TubeGeometry(curve, it.polyline ? 24 * (pts.length - 1) : 48, it.radius, 8, false));
       root.add(new THREE.Mesh(tube, mat(it.color, { roughness: 0.6 })));
     }
     // BMS
