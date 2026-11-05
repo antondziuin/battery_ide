@@ -32,7 +32,7 @@ jobs:
       - name: Prepare site
         run: |
           mkdir -p _site
-          cp -r index.html css js _site/
+          cp -r index.html css js vendor _site/
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
         with:

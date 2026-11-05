@@ -87,8 +87,6 @@
           </label>
         </div>
         <label class="check"><input id="inMirror" type="checkbox" checked> Нижню сторону показувати перевернутою</label>
-        <label class="check"><input id="inBalance" type="checkbox" checked> Показувати BMS і дроти</label>
-        <label class="check"><input id="inAnalysis" type="checkbox" checked> Підсвітити навантаження перемичок</label>
 
         <h3>BMS і силові виводи</h3>
         <div class="row2">
@@ -146,8 +144,50 @@
               <button class="ghost" data-zoom="1" title="Збільшити">+</button>
             </div>
           </div>
+          <div class="seg mode-seg" id="modeSeg" role="tablist">
+            <button data-mode="scheme">Схема</button>
+            <button data-mode="assembly">Збирання</button>
+            <button data-mode="currents">Струми</button>
+            <button data-mode="wiring">Проводка BMS</button>
+            <button data-mode="3d">3D</button>
+          </div>
+          <div class="step-row" id="stepRow">
+            <span class="step-label">Крок:</span>
+            <div class="seg" id="stepSeg">
+              <button data-step="all">Усе разом</button>
+              <button data-step="cells">1 · Комірки</button>
+              <button data-step="top">2 · Верх</button>
+              <button data-step="bottom">3 · Низ</button>
+            </div>
+          </div>
+          <p class="hint mode-hint" id="modeHint"></p>
           <div id="warnings"></div>
           <div class="svg-wrap" id="svgWrap"><div id="svgHost"></div></div>
+          <div class="view3d" id="view3d" hidden>
+            <div class="v3d-toolbar">
+              <div class="seg v3d-views">
+                <button data-view="iso">Ізометрія</button>
+                <button data-view="top">Зверху</button>
+                <button data-view="bottom">Знизу</button>
+                <button data-view="front">Спереду</button>
+                <button data-view="side">Збоку</button>
+              </div>
+              <label class="check"><input id="v3dStrips" type="checkbox"> Перемички</label>
+              <label class="check"><input id="v3dWires" type="checkbox"> BMS і дроти</label>
+              <label class="check"><input id="v3dLabels" type="checkbox"> Підписи</label>
+              <label class="check"><input id="v3dBox" type="checkbox"> Корпус</label>
+              <label class="inline">Колір перемичок
+                <select id="v3dColor">
+                  <option value="type">За типом</option>
+                  <option value="current">За струмом</option>
+                </select>
+              </label>
+              <label class="inline range">Розліт шарів
+                <input id="v3dExplode" type="range" min="0" max="1" step="0.05">
+              </label>
+            </div>
+            <div class="v3d-host" id="v3dHost"><div class="v3d-tip" id="v3dTip" hidden></div><div class="v3d-msg" id="v3dMsg"></div></div>
+          </div>
         </div>
         <div class="cards" id="statsCards"></div>
         <div class="layout-2eq">

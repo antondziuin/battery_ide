@@ -8,6 +8,7 @@ import { renderPackSVG, renderFitSVG } from '../js/render.js';
 import { analyzeCurrents } from '../js/analysis.js';
 import { bmsPlan, protectionProfile, wireColor } from '../js/bms.js';
 import { renderBmsSVG } from '../js/schematic.js';
+import { buildScene3D } from '../js/scene3d.js';
 
 const c18650 = BUILTIN_CELLS.find((c) => c.id === '18650-generic');
 const c21700 = BUILTIN_CELLS.find((c) => c.id === 'samsung-50e');
@@ -335,9 +336,78 @@ test('SVG схеми BMS та фізичної схеми з аналізом', 
     if (port === 'separate') assert.ok(svg.includes('C−'));
   }
   const a = analyzeCurrents(L, c21700, { load: 30, strip });
-  const pack = renderPackSVG(L, { analysis: a, labels: 'current', mirrorBottom: true });
+  const pack = renderPackSVG(L, { mode: 'wiring', analysis: a, mirrorBottom: true });
   assert.ok(pack.includes('BMS') && pack.includes('P+') && pack.includes('<title>'));
   assert.ok(!/NaN|undefined|Infinity/.test(pack));
   const pr = generateLayout({ S: 8, P: 2, rows: 1, arrangement: 'grid', snake: 'cols', gap: 1, cell: prism, bmsSide: 'bottom' });
-  assert.ok(!/NaN|undefined/.test(renderPackSVG(pr, { analysis: analyzeCurrents(pr, prism, { load: 100, strip }) })));
+  for (const mode of ['scheme', 'assembly', 'currents', 'wiring'])
+    assert.ok(!/NaN|undefined/.test(renderPackSVG(pr, { mode, analysis: analyzeCurrents(pr, prism, { load: 100, strip }) })), mode);
+});
+
+test('режими 2D-схеми показують лише потрібне', () => {
+  const L = generateLayout({ S: 6, P: 3, rows: 3, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c18650 });
+  const a = analyzeCurrents(L, c18650, { load: 15, strip });
+  const scheme = renderPackSVG(L, { mode: 'scheme', analysis: a });
+  assert.ok(scheme.includes('Схема з') && scheme.includes('marker-end') && scheme.includes('P−') && scheme.includes('P+'));
+  assert.ok(!scheme.includes('Вигляд знизу') && !scheme.includes('BMS'));
+  // 5 переходів між групами (+ відрізки P−→1 і 6→P+, якщо вивід не в центрі групи)
+  assert.ok((scheme.match(/marker-end/g) || []).length >= 5);
+  const asm = renderPackSVG(L, { mode: 'assembly', mirrorBottom: true });
+  assert.ok(asm.includes('Вигляд зверху') && asm.includes('Вигляд знизу') && !asm.includes('>BMS<'));
+  const cells = renderPackSVG(L, { mode: 'assembly', step: 'cells' });
+  assert.ok(cells.includes('Крок 1') && !cells.includes('Вигляд знизу') && !cells.includes('перемичка B'));
+  const top = renderPackSVG(L, { mode: 'assembly', step: 'top' });
+  assert.ok(top.includes('Крок 2') && top.includes('B1') && !top.includes('B0 P−'));
+  const bottom = renderPackSVG(L, { mode: 'assembly', step: 'bottom', mirrorBottom: true });
+  assert.ok(bottom.includes('Крок 3') && bottom.includes('B0 P−'));
+  const cur = renderPackSVG(L, { mode: 'currents', analysis: a });
+  assert.ok(cur.includes('5А') || cur.includes('5,'));
+  assert.ok(cur.includes('допустимого'));
+  const wir = renderPackSVG(L, { mode: 'wiring' });
+  assert.ok(wir.includes('>BMS<') && wir.includes('Балансувальний дріт B3'));
+  for (const s of [scheme, asm, cells, top, bottom, cur, wir]) assert.ok(!/NaN|undefined|Infinity/.test(s));
+});
+
+test('схема попереджає про стик груп в одну комірку', () => {
+  const L = generateLayout({ S: 13, P: 4, rows: 8, arrangement: 'grid', snake: 'u', gap: 0.5, cell: c21700 });
+  assert.ok(renderPackSVG(L, { mode: 'scheme' }).includes('1 контакт!'));
+  const ok = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700 });
+  assert.ok(!renderPackSVG(ok, { mode: 'scheme' }).includes('1 контакт!'));
+});
+
+test('3D-сцена: комірки, перемички, дроти, розліт і межі', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700, bmsSide: 'right' });
+  const a = analyzeCurrents(L, c21700, { load: 20, strip });
+  const sc = buildScene3D(L, c21700, { strip, analysis: a, stripColor: 'current', enclosure: true });
+  const kinds = (k) => sc.items.filter((i) => i.kind === k);
+  assert.equal(kinds('cell').length, 40);
+  assert.equal(kinds('strip').length, L.linkCount);
+  assert.equal(kinds('wire').length, 11 + 2); // B0…B10 + P−/P+
+  assert.equal(kinds('bms').length, 1);
+  assert.equal(kinds('label').length, 10 + 2);
+  assert.equal(kinds('enclosure').length, 1);
+  assert.ok(kinds('strip').every((s) => s.current != null && /^#/.test(s.color)));
+  // пакет відцентровано, верхні перемички над комірками, нижні — під ними
+  const xs = kinds('cell').map((c) => c.x);
+  assert.ok(Math.abs(Math.min(...xs) + Math.max(...xs)) < 1e-6);
+  assert.ok(kinds('strip').filter((s) => s.side === 'top').every((s) => s.y > c21700.h));
+  assert.ok(kinds('strip').filter((s) => s.side === 'bottom').every((s) => s.y < 0));
+  // BMS праворуч від пакета
+  assert.ok(kinds('bms')[0].x > L.width / 2);
+  const ex = buildScene3D(L, c21700, { strip, explode: 1, wires: false, labels: false });
+  const topY = (sc2) => Math.max(...sc2.items.filter((i) => i.kind === 'strip').map((s) => s.y));
+  assert.ok(topY(ex) > topY(sc) + c21700.h * 0.3);
+  assert.equal(ex.items.filter((i) => i.kind === 'wire' || i.kind === 'bms' || i.kind === 'label').length, 0);
+  const all = JSON.stringify(sc);
+  assert.ok(!/null,null|NaN|Infinity/.test(all));
+  for (const v of [...sc.bounds.min, ...sc.bounds.max]) assert.ok(Number.isFinite(v));
+});
+
+test('3D-сцена для призматичних комірок', () => {
+  const L = generateLayout({ S: 8, P: 2, rows: 2, arrangement: 'grid', snake: 'cols', gap: 1, cell: prism, bmsSide: 'top' });
+  const sc = buildScene3D(L, prism, { strip });
+  assert.equal(sc.terminals.length, 16);
+  assert.ok(sc.items.filter((i) => i.kind === 'strip').every((s) => s.y > prism.h));
+  assert.ok(sc.items.some((i) => i.kind === 'wire' && i.radius === 3)); // кабель між рядами
+  assert.ok(!/NaN|Infinity/.test(JSON.stringify(sc)));
 });

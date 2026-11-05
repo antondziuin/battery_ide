@@ -28,6 +28,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg); color: var(--text);
@@ -144,6 +145,23 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 
 .steps { margin: 0; padding-left: 20px; font-size: 13px; }
 button.wide { width: 100%; margin-top: 4px; }
+.mode-seg { margin: 4px 0 8px; flex-wrap: wrap; }
+.mode-seg button { font-size: 13px; padding: 8px 6px; min-width: 72px; }
+.step-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.step-row .seg { margin: 0; flex: 1; min-width: 260px; }
+.step-label { font-size: 12px; color: var(--muted); }
+.mode-hint { margin: 2px 0 8px; }
+.view3d { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.v3d-toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.v3d-toolbar label { margin: 0; }
+.v3d-toolbar .seg { margin: 0; }
+.v3d-toolbar .seg button { font-size: 12px; padding: 5px 8px; }
+label.inline { flex-direction: row; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+label.inline select { width: auto; padding: 4px 6px; }
+label.range input { width: 110px; padding: 0; }
+.v3d-host { position: relative; height: min(68vh, 680px); min-height: 340px; background: #eef1f5; touch-action: none; }
+.v3d-tip { position: absolute; pointer-events: none; background: rgba(29, 35, 43, .92); color: #fff; font-size: 12px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; z-index: 2; }
+.v3d-msg { position: absolute; inset: auto 0 0 0; text-align: center; font-size: 12px; color: #5b6672; padding: 6px; pointer-events: none; }
 .btn-row.tight { margin-top: 0; flex: 0 0 auto; }
 .btn-row.tight > * { flex: 0 0 auto; }
 h3.first { margin-top: 0; }
@@ -175,6 +193,9 @@ h3.first { margin-top: 0; }
   .controls { position: static; max-height: none; }
 }
 @media (max-width: 520px) {
+  .mode-seg { flex-wrap: nowrap; }
+  .mode-seg button { min-width: 0; flex: 1 1 0; padding: 7px 2px; font-size: 12px; line-height: 1.2; }
+  .v3d-host { height: 58vh; }
   .topbar { padding: 8px 12px; gap: 8px; }
   .tabs { order: 3; flex-basis: 100%; }
   main { padding: 16px; }

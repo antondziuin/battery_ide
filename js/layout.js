@@ -29,6 +29,29 @@ export function autoRows(S, P, shape = 'cyl', snake = 'cols') {
 export const BMS_SIDES = ['right', 'left', 'top', 'bottom'];
 
 /**
+ * Точка клеми комірки на заданій стороні (у координатах схеми, мм).
+ * Для циліндрів — центр торця; для призматичних — відповідна клема на верхній кришці.
+ */
+export function terminalPoint(layout, c, side) {
+  if (layout.shape !== 'prism') return [c.x, c.y];
+  const fp = layout.footprint;
+  if (layout.rotate) return side === 'top' ? [c.x - fp.w * 0.3, c.y] : [c.x + fp.w * 0.3, c.y];
+  return side === 'top' ? [c.x, c.y - fp.h * 0.3] : [c.x, c.y + fp.h * 0.3];
+}
+
+/** Центр (середнє положення) комірок кожної групи та «центральна» комірка групи. */
+export function groupCentroids(layout) {
+  const acc = Array.from({ length: layout.S }, () => ({ x: 0, y: 0, n: 0 }));
+  for (const c of layout.cells) { const a = acc[c.group]; a.x += c.x; a.y += c.y; a.n++; }
+  return acc.map((a, g) => {
+    const x = a.x / a.n, y = a.y / a.n;
+    let best = null;
+    for (const c of layout.cells) if (c.group === g && (!best || Math.hypot(c.x - x, c.y - y) < Math.hypot(best.x - x, best.y - y))) best = c;
+    return { x, y, cell: best.id };
+  });
+}
+
+/**
  * @param {object} o
  * @param {number} o.S  кількість послідовних груп
  * @param {number} o.P  кількість паралельних комірок у групі
