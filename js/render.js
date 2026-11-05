@@ -8,7 +8,7 @@
 
 import { loadColor } from './analysis.js';
 import { wireColor, harnessRoutes } from './routing.js';
-import { terminalPoint, groupCentroids } from './layout.js';
+import { terminalPoint, groupCentroids, prismLinkBlocked } from './layout.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const f = (n) => (Math.round(n * 100) / 100).toString();
@@ -20,7 +20,7 @@ export function groupColor(g, light = 78) {
 const COLORS = {
   bg: '#ffffff', text: '#1d232b', muted: '#5b6672', stroke: '#2c333b',
   nickel: '#9aa4ae', series: '#d4862a', plus: '#d93636', minus: '#1d232b',
-  tag: '#2456c7', tagPack: '#b3261e', dim: '#7a8591', flow: '#1d232b',
+  tag: '#2456c7', tagPack: '#b3261e', dim: '#7a8591', flow: '#1d232b', jumper: '#6741d9', copper: '#c0703a',
 };
 
 const MIRROR_SIDE = { left: 'right', right: 'left', top: 'top', bottom: 'bottom' };
@@ -102,6 +102,7 @@ export function renderPackSVG(layout, opts = {}) {
       layout, opts, fs, mirror: !!v.mirror, side: v.side, bmsBox, showBms, mode, step,
       noStrips: !!v.noStrips, analysis: mode === 'currents' && opts.analysis?.ok ? opts.analysis : null,
     };
+    s += frameDecor(ctx);
     if (v.side === 'scheme') s += schemeView(ctx);
     else s += cyl ? cylView(ctx) : prismView(ctx);
     if (mode !== 'wiring') s += dims(layout, fs);
@@ -109,6 +110,25 @@ export function renderPackSVG(layout, opts = {}) {
   });
   s += legend(leg, fs, H - legendH);
   s += '</svg>';
+  return s;
+}
+
+/** Контур довільної форми корпусу та підписи ярусів. */
+function frameDecor(ctx) {
+  const { layout, fs, mirror } = ctx;
+  const X = (x) => (mirror ? layout.width - x : x);
+  let s = '';
+  if (layout.outline) {
+    const pts = layout.outline.map(([x, y]) => `${f(X(x))},${f(y)}`).join(' ');
+    for (let l = 0; l < layout.layers; l++)
+      s += `<polygon points="${pts}" transform="translate(0,${f(l * layout.layerStep)})" fill="#f3f6fa" stroke="${COLORS.dim}" stroke-width="${f(fs * 0.1)}" stroke-dasharray="${f(fs * 0.5)} ${f(fs * 0.3)}"/>`;
+  }
+  if (layout.layers > 1)
+    for (let l = 0; l < layout.layers; l++) {
+      const y = l * layout.layerStep - fs * 0.6;
+      const groups = `групи ${l * layout.groupsPerLayer + 1}–${Math.min(layout.S, (l + 1) * layout.groupsPerLayer)}`;
+      s += `<text x="${f(mirror ? layout.width : 0)}" y="${f(y)}" font-size="${f(fs * 0.9)}" font-weight="700" text-anchor="${mirror ? 'end' : 'start'}" fill="${COLORS.tag}">Ярус ${l + 1} · ${groups}${l ? ' (над ярусом ' + l + ')' : ' (нижній)'}</text>`;
+    }
   return s;
 }
 
@@ -148,13 +168,15 @@ function cellTitle(c, opts) {
 
 function linkStyle(ctx, bus, li, l) {
   const a = ctx.analysis;
+  const kind = l.jumper ? 'Дріт-перемичка' : l.series ? 'Послідовна перемичка' : 'Паралельна перемичка';
   if (a) {
     const I = a.linkI[bus.index][li];
-    const ratio = I / a.ampacity;
-    return { color: loadColor(ratio), opacity: 0.88, title: `Перемичка B${bus.index}: ${fmt1(I)} А (${Math.round(ratio * 100)}% допустимого)` };
+    const ratio = a.linkRatio ? a.linkRatio[bus.index][li] : I / a.ampacity;
+    return { color: loadColor(ratio), opacity: 0.88, title: `${kind} B${bus.index}: ${fmt1(I)} А (${Math.round(ratio * 100)}% допустимого)` };
   }
-  if (ctx.mode === 'wiring') return { color: '#c4cad1', opacity: 0.7, title: `Перемичка B${bus.index}` };
-  return { color: l.series ? COLORS.series : COLORS.nickel, opacity: 0.85, title: `${l.series ? 'Послідовна' : 'Паралельна'} перемичка B${bus.index}` };
+  if (ctx.mode === 'wiring') return { color: '#c4cad1', opacity: 0.7, title: `${kind} B${bus.index}` };
+  if (l.jumper) return { color: COLORS.jumper, opacity: 0.95, title: `${kind} B${bus.index} (${Math.round(l.len)} мм)` };
+  return { color: l.series ? COLORS.series : COLORS.nickel, opacity: 0.85, title: `${kind} B${bus.index}` };
 }
 
 function tag(x, y, text, color, fs) {
@@ -178,7 +200,7 @@ function schemeView(ctx) {
   const ow = Math.max(r * 0.12, fs * 0.15); // товщина контуру групи
   // пари сусідніх комірок однієї групи
   const pairs = new Map();
-  for (const b of layout.buses) for (const l of b.links) if (!l.series) pairs.set(`${Math.min(l.a, l.b)}-${Math.max(l.a, l.b)}`, l);
+  for (const b of layout.buses) for (const l of b.links) if (!l.series && !l.jumper) pairs.set(`${Math.min(l.a, l.b)}-${Math.max(l.a, l.b)}`, l);
   const shape = (c, grow, color) => (cyl
     ? `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(r + grow)}" fill="${color}"/>`
     : `<rect x="${f(c.x - fp.w / 2 - grow)}" y="${f(c.y - fp.h / 2 - grow)}" width="${f(fp.w + 2 * grow)}" height="${f(fp.h + 2 * grow)}" rx="${f(r * 0.15 + grow)}" fill="${color}"/>`);
@@ -280,12 +302,28 @@ function cylView(ctx) {
     s += `<circle cx="${f(X(c.x))}" cy="${f(c.y)}" r="${f(r)}" fill="${groupColor(c.group, dim ? 90 : 78)}" stroke="${dim ? '#aab2bb' : COLORS.stroke}" stroke-width="${f(r * 0.05)}">${cellTitle(c, opts)}</circle>`;
   if (!ctx.noStrips) {
     const sw = r * (dim ? 0.4 : 0.62);
-    for (const b of layout.buses.filter((b) => b.side === side))
+    const jumpers = [];
+    for (const b of layout.buses.filter((b) => b.side === side)) {
+      // мідна збірна шина під перемичками крайньої групи
+      for (const e of b.collector || []) {
+        const A = layout.cells[e.a], B = layout.cells[e.b];
+        s += `<line x1="${f(X(A.x))}" y1="${f(A.y)}" x2="${f(X(B.x))}" y2="${f(B.y)}" stroke="${COLORS.copper}" stroke-width="${f(sw * 1.35)}" stroke-linecap="round" opacity="${dim ? 0.5 : 0.9}"><title>Мідна збірна шина силового виводу B${b.index}</title></line>`;
+      }
       b.links.forEach((l, li) => {
+        if (l.jumper) { jumpers.push([b, li, l]); return; }
         const A = layout.cells[l.a], B = layout.cells[l.b];
         const st = linkStyle(ctx, b, li, l);
         s += `<line x1="${f(X(A.x))}" y1="${f(A.y)}" x2="${f(X(B.x))}" y2="${f(B.y)}" stroke="${st.color}" stroke-width="${f(sw)}" stroke-linecap="round" opacity="${st.opacity}"><title>${esc(st.title)}</title></line>`;
       });
+    }
+    // дроти-перемички — поверх, пунктиром (ізольований дріт)
+    for (const [b, li, l] of jumpers) {
+      const A = layout.cells[l.a], B = layout.cells[l.b];
+      const st = linkStyle(ctx, b, li, l);
+      s += `<line x1="${f(X(A.x))}" y1="${f(A.y)}" x2="${f(X(B.x))}" y2="${f(B.y)}" stroke="#fff" stroke-width="${f(r * 0.5)}" stroke-linecap="round"/>`;
+      s += `<line x1="${f(X(A.x))}" y1="${f(A.y)}" x2="${f(X(B.x))}" y2="${f(B.y)}" stroke="${st.color}" stroke-width="${f(r * 0.3)}" stroke-dasharray="${f(r * 0.6)} ${f(r * 0.35)}" stroke-linecap="round"><title>${esc(st.title)}</title></line>`;
+      for (const c of [A, B]) s += `<circle cx="${f(X(c.x))}" cy="${f(c.y)}" r="${f(r * 0.22)}" fill="${st.color}"/>`;
+    }
   }
   for (const c of layout.cells) {
     const plus = side === 'top' ? c.plusTop : !c.plusTop;
@@ -330,7 +368,7 @@ function prismView(ctx) {
         const A = T(ca, b.side), B = T(cb, b.side);
         const st = linkStyle(ctx, b, li, l);
         // сусіди вздовж осі клем: шина пройшла б над іншою клемою — показуємо як гнучкий кабель
-        const cable = layout.rotate ? Math.abs(ca.y - cb.y) < 1e-6 : Math.abs(ca.x - cb.x) < 1e-6;
+        const cable = l.jumper || prismLinkBlocked(layout, ca, cb, b.side);
         s += cable
           ? `<line x1="${f(A[0] + tr * 1.4)}" y1="${f(A[1])}" x2="${f(B[0] + tr * 1.4)}" y2="${f(B[1])}" stroke="${st.color}" stroke-width="${f(tr * 0.6)}" stroke-dasharray="${f(tr)} ${f(tr * 0.6)}" stroke-linecap="round"><title>${esc(st.title)}</title></line>`
           : `<line x1="${f(A[0])}" y1="${f(A[1])}" x2="${f(B[0])}" y2="${f(B[1])}" stroke="${st.color}" stroke-width="${f(tr * 1.3)}" stroke-linecap="round" opacity="${st.opacity}"><title>${esc(st.title)}</title></line>`;
@@ -384,6 +422,8 @@ function legendLayout(layout, fs, W, mode, step) {
     [COLORS.tag, 'номер шини (балансувальний вивід)'],
   ];
   if (layout.shape === 'prism' && mode !== 'scheme') items.push([COLORS.muted, 'пунктир — гнучкий кабель між рядами']);
+  if (layout.jumperCount && mode !== 'scheme' && mode !== 'wiring' && step !== 'cells') items.push([COLORS.jumper, 'пунктир — дріт-перемичка (ізольований)']);
+  if (layout.buses[0].collector && (mode === 'assembly' || mode === 'currents') && step !== 'cells') items.push([COLORS.copper, 'мідна збірна шина силового виводу']);
   const placed = [];
   let x = fs, line = 0;
   for (const [c, t] of items) {
@@ -408,30 +448,34 @@ function legend(leg, fs, y) {
 /**
  * Прев'ю вписування в корпус: переріз корпусу в площині, перпендикулярній осі комірок.
  */
-export function renderFitSVG({ planeA, planeB, margin, aAxis, bAxis, layout, layers, depth, cellLen }) {
+export function renderFitSVG({ planeA, planeB, margin, aAxis, bAxis, layout, layers, depth, cellLen, outline, capacity }) {
   const fp = layout.footprint;
   const base = Math.min(fp.w, fp.h);
   const fs = Math.max(3, Math.min(Math.max(planeA, planeB) * 0.035, 24));
   const pad = fs * 3.5;
-  const W = planeA + pad * 2, H = planeB + pad * 2 + fs * 2;
+  const W = planeA + pad * 2, H = planeB + pad * 2 + fs * 3.4;
   let s = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${f(W)} ${f(H)}" font-family="Inter, Segoe UI, Arial, sans-serif">`;
   s += `<rect width="${f(W)}" height="${f(H)}" fill="#fff"/>`;
   s += `<g transform="translate(${f(pad)},${f(pad)})">`;
-  s += `<rect x="0" y="0" width="${f(planeA)}" height="${f(planeB)}" fill="#eef2f6" stroke="#2c333b" stroke-width="${f(fs * 0.15)}" rx="${f(fs * 0.3)}"/>`;
-  s += `<rect x="${f(margin)}" y="${f(margin)}" width="${f(planeA - 2 * margin)}" height="${f(planeB - 2 * margin)}" fill="none" stroke="#7a8591" stroke-dasharray="${f(fs * 0.4)} ${f(fs * 0.3)}" stroke-width="${f(fs * 0.08)}"/>`;
+  if (outline) {
+    s += `<polygon points="${outline.map(([x, y]) => `${f(x + margin)},${f(y + margin)}`).join(' ')}" fill="#eef2f6" stroke="#2c333b" stroke-width="${f(fs * 0.15)}" stroke-linejoin="round"/>`;
+  } else {
+    s += `<rect x="0" y="0" width="${f(planeA)}" height="${f(planeB)}" fill="#eef2f6" stroke="#2c333b" stroke-width="${f(fs * 0.15)}" rx="${f(fs * 0.3)}"/>`;
+    s += `<rect x="${f(margin)}" y="${f(margin)}" width="${f(planeA - 2 * margin)}" height="${f(planeB - 2 * margin)}" fill="none" stroke="#7a8591" stroke-dasharray="${f(fs * 0.4)} ${f(fs * 0.3)}" stroke-width="${f(fs * 0.08)}"/>`;
+  }
   s += `<g transform="translate(${f(margin)},${f(margin)})">`;
   for (const c of layout.cells) {
     if (layout.shape === 'cyl') s += `<circle cx="${f(c.x)}" cy="${f(c.y)}" r="${f(fp.w / 2)}" fill="${groupColor(c.group)}" stroke="#2c333b" stroke-width="${f(base * 0.03)}"/>`;
     else s += `<rect x="${f(c.x - fp.w / 2)}" y="${f(c.y - fp.h / 2)}" width="${f(fp.w)}" height="${f(fp.h)}" fill="${groupColor(c.group)}" stroke="#2c333b" stroke-width="${f(base * 0.03)}"/>`;
     if (base > fs * 1.5) s += `<text x="${f(c.x)}" y="${f(c.y + fs * 0.3)}" font-size="${f(Math.min(fs * 0.8, base * 0.3))}" text-anchor="middle" fill="#1d232b">${c.group + 1}</text>`;
   }
-  s += `<rect x="0" y="0" width="${f(layout.width)}" height="${f(layout.height)}" fill="none" stroke="#2456c7" stroke-width="${f(fs * 0.1)}" stroke-dasharray="${f(fs * 0.6)} ${f(fs * 0.3)}"/>`;
+  if (!outline) s += `<rect x="0" y="0" width="${f(layout.width)}" height="${f(layout.height)}" fill="none" stroke="#2456c7" stroke-width="${f(fs * 0.1)}" stroke-dasharray="${f(fs * 0.6)} ${f(fs * 0.3)}"/>`;
   s += '</g>';
   s += `<g font-size="${f(fs)}" fill="#1d232b">`;
   s += `<text x="${f(planeA / 2)}" y="${f(-fs * 0.9)}" text-anchor="middle">${aAxis} = ${f(planeA)} мм</text>`;
   s += `<text x="${f(-fs * 0.9)}" y="${f(planeB / 2)}" text-anchor="middle" transform="rotate(-90 ${f(-fs * 0.9)} ${f(planeB / 2)})">${bAxis} = ${f(planeB)} мм</text>`;
-  s += `<text x="0" y="${f(planeB + fs * 1.6)}" fill="#2456c7">Блок: ${f(layout.width)} × ${f(layout.height)} мм</text>`;
-  s += `<text x="${f(planeA)}" y="${f(planeB + fs * 1.6)}" text-anchor="end" fill="#5b6672">Глибина: ${f(depth)} мм, комірка ${f(cellLen)} мм${layers > 1 ? `, шарів: ${layers}` : ''}</text>`;
+  s += `<text x="0" y="${f(planeB + fs * 1.6)}" fill="#2456c7">${outline ? `Комірок: ${layout.N}${capacity ? ` з ${capacity} місць` : ''}` : `Блок: ${f(layout.width)} × ${f(layout.height)} мм`}</text>`;
+  s += `<text x="0" y="${f(planeB + fs * 3)}" fill="#5b6672">Глибина: ${f(depth)} мм, комірка ${f(cellLen)} мм${layers > 1 ? `, шарів: ${layers}` : ''}</text>`;
   s += '</g></g></svg>';
   return s;
 }

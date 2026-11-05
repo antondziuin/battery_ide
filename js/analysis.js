@@ -8,7 +8,7 @@
 // Систему G·v = i (лапласіан провідностей, вузол P− заземлено) розв'язуємо методом спряжених
 // градієнтів з передобумовлювачем Якобі — матриця розріджена, симетрична, додатно визначена.
 
-import { STRIP_MATERIALS, stripCalc } from './tools.js';
+import { STRIP_MATERIALS, stripCalc, AWG_TABLE } from './tools.js';
 
 const nodeOf = (cellId, side) => cellId * 2 + (side === 'top' ? 0 : 1);
 
@@ -17,7 +17,11 @@ const nodeOf = (cellId, side) => cellId * 2 + (side === 'top' ? 0 : 1);
  * @param {object} cell комірка
  * @param {object} o
  * @param {number} o.load струм навантаження, А
- * @param {{material:string,width:number,thickness:number,layers:number}} o.strip перемички
+ * @param {{material:string,width:number,thickness:number,layers:number}} o.strip паралельні перемички
+ * @param {{material:string,width:number,thickness:number,layers:number}} [o.seriesStrip] послідовні
+ *        перемички (між групами), якщо відрізняються від паралельних
+ * @param {number} [o.jumperArea] перетин мідних дротів-перемичок, мм²
+ * @param {number} [o.collectorArea] перетин мідної збірної шини вздовж крайньої групи, мм²
  * @param {number} [o.weld] опір одного зварного з'єднання, мОм
  */
 export function analyzeCurrents(layout, cell, o) {
@@ -26,13 +30,31 @@ export function analyzeCurrents(layout, cell, o) {
   const S = layout.S;
   if (!(I > 0)) return { ok: false, reason: 'Задайте струм навантаження' };
   const strip = o.strip || { material: 'nickel', width: 8, thickness: 0.15, layers: 1 };
-  const mat = STRIP_MATERIALS[strip.material] || STRIP_MATERIALS.nickel;
-  const area = Math.max(1e-6, strip.width * strip.thickness * Math.max(1, strip.layers || 1)); // мм²
+  const spec = (st) => {
+    const mat = STRIP_MATERIALS[st.material] || STRIP_MATERIALS.nickel;
+    return {
+      rho: mat.rho,
+      area: Math.max(1e-6, st.width * st.thickness * Math.max(1, st.layers || 1)), // мм²
+      ampacity: stripCalc({ material: st.material, width: st.width, thickness: st.thickness, layers: st.layers }).ampacity,
+    };
+  };
+  const par = spec(strip);
+  const ser = o.seriesStrip ? spec(o.seriesStrip) : par;
+  const RHO_CU = 1.72e-8;
+  const jumperArea = Math.max(0.2, o.jumperArea || 3.3);
+  const jumper = { rho: RHO_CU, area: jumperArea, ampacity: wireAmpacity(jumperArea) };
+  const collectorArea = Math.max(0.5, o.collectorArea || 5);
+  const ampacity = par.ampacity;
   const weld = (o.weld ?? 0.15) / 1000; // Ом на одне зварювання
   const rCell = Math.max(0.05, cell.ir || 20) / 1000; // Ом
-  const ampacity = stripCalc({ material: strip.material, width: strip.width, thickness: strip.thickness, layers: strip.layers }).ampacity;
+  const specOf = (l) => (l.jumper ? jumper : l.series ? ser : par);
 
-  const nNodes = 2 * N;
+  // мідна збірна шина: окремі вузли вздовж шини; кожна комірка приварена до неї
+  const colNode = new Map(); // `${bus}:${cell}` → вузол
+  let nNodes = 2 * N;
+  for (const b of layout.buses)
+    for (const e of b.collector || [])
+      for (const id of [e.a, e.b]) if (!colNode.has(`${b.index}:${id}`)) colNode.set(`${b.index}:${id}`, nNodes++);
   const adj = Array.from({ length: nNodes }, () => []);
   const addEdge = (a, b, g) => { adj[a].push([b, g]); adj[b].push([a, g]); };
 
@@ -44,15 +66,30 @@ export function analyzeCurrents(layout, cell, o) {
   const linkR = [];
   for (const b of layout.buses) {
     linkR.push(b.links.map((l) => {
-      const R = (mat.rho * (l.len / 1000)) / (area * 1e-6) + 2 * weld;
+      const sp = specOf(l);
+      const R = (sp.rho * (l.len / 1000)) / (sp.area * 1e-6) + 2 * weld;
       addEdge(nodeOf(l.a, b.side), nodeOf(l.b, b.side), 1 / R);
       return R;
     }));
+    // мідна збірна шина: мідь між вузлами шини + зварювання кожної комірки до шини
+    for (const e of b.collector || []) {
+      const R = (RHO_CU * (e.len / 1000)) / (collectorArea * 1e-6);
+      addEdge(colNode.get(`${b.index}:${e.a}`), colNode.get(`${b.index}:${e.b}`), 1 / Math.max(R, 1e-6));
+    }
+    const welded = new Set();
+    for (const e of b.collector || [])
+      for (const id of [e.a, e.b]) {
+        if (welded.has(id)) continue;
+        welded.add(id);
+        addEdge(nodeOf(id, b.side), colNode.get(`${b.index}:${id}`), 1 / weld);
+      }
   }
 
   const busN = layout.buses[0], busP = layout.buses[S];
-  const nMinus = nodeOf(busN.power ?? busN.members[0], busN.side);
-  const nPlus = nodeOf(busP.power ?? busP.members[busP.members.length - 1], busP.side);
+  const pMinus = busN.power ?? busN.members[0], pPlus = busP.power ?? busP.members[busP.members.length - 1];
+  // силовий дріт підходить до збірної шини (якщо є) або до клеми комірки
+  const nMinus = colNode.get(`0:${pMinus}`) ?? nodeOf(pMinus, busN.side);
+  const nPlus = colNode.get(`${S}:${pPlus}`) ?? nodeOf(pPlus, busP.side);
 
   // досяжні вузли від P−
   const seen = new Uint8Array(nNodes);
@@ -121,13 +158,22 @@ export function analyzeCurrents(layout, cell, o) {
   // струми перемичок
   let stripLoss = 0;
   let maxLink = null;
-  const linkI = layout.buses.map((b, bi) => b.links.map((l, li) => {
-    const R = linkR[bi][li];
-    const cur = Math.abs(V(nodeOf(l.a, b.side)) - V(nodeOf(l.b, b.side))) / R;
-    stripLoss += cur * cur * R;
-    if (!maxLink || cur > maxLink.I) maxLink = { bus: b.index, link: li, I: cur, series: l.series, a: l.a, b: l.b };
+  const linkRatio = [];
+  const linkI = layout.buses.map((b, bi) => {
+    const ratios = [];
+    const cur = b.links.map((l, li) => {
+      const R = linkR[bi][li];
+      const c = Math.abs(V(nodeOf(l.a, b.side)) - V(nodeOf(l.b, b.side))) / R;
+      const amp = specOf(l).ampacity;
+      ratios.push(c / amp);
+      stripLoss += c * c * R;
+      // «найнавантаженіша» — з найбільшою часткою від власного допустимого струму
+      if (!maxLink || c / amp > maxLink.ratio) maxLink = { bus: b.index, link: li, I: c, ampacity: amp, ratio: c / amp, series: l.series, jumper: !!l.jumper, a: l.a, b: l.b };
+      return c;
+    });
+    linkRatio.push(ratios);
     return cur;
-  }));
+  });
   // статистика по групах
   const groups = Array.from({ length: S }, () => ({ min: Infinity, max: -Infinity, sum: 0, minId: -1, maxId: -1 }));
   for (const c of layout.cells) {
@@ -150,11 +196,20 @@ export function analyzeCurrents(layout, cell, o) {
     ok: true, load: I, iterations: iter,
     cellI, linkI, groups, worstGroup: worst,
     maxCell, maxCellId, maxCellRatio: cell.iMax ? maxCell / cell.iMax : 0,
-    maxLink, ampacity, maxLinkRatio: maxLink ? maxLink.I / ampacity : 0,
+    maxLink, ampacity, linkRatio, seriesAmpacity: ser.ampacity, jumperAmpacity: jumper.ampacity,
+    maxLinkRatio: maxLink ? maxLink.ratio : 0,
     stripLoss, cellLoss, drop,
     vTerm: S * cell.vNom - drop,
     plusNode: nPlus, minusNode: nMinus,
   };
+}
+
+/** Орієнтовний тривалий струм мідного дроту в силіконі за перетином (див. AWG_TABLE). */
+export function wireAmpacity(mm2) {
+  const t = AWG_TABLE.find((w) => w.mm2 >= mm2 - 1e-9) || AWG_TABLE[AWG_TABLE.length - 1];
+  const prev = [...AWG_TABLE].reverse().find((w) => w.mm2 <= mm2 + 1e-9) || AWG_TABLE[0];
+  if (t === prev || t.mm2 === prev.mm2) return t.amps;
+  return prev.amps + ((mm2 - prev.mm2) / (t.mm2 - prev.mm2)) * (t.amps - prev.amps);
 }
 
 /** Колір перемички за навантаженням відносно допустимого струму. */

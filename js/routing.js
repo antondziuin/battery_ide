@@ -18,6 +18,7 @@ export function wireColor(k) {
  * @returns {{side, dir, bms:{x,y,w,h}, pins, routes}}
  */
 export function harnessRoutes(layout, o = {}) {
+  if (layout.harness?.mode === 'channel') return channelRoutes(layout, o);
   const S = layout.S;
   const side = layout.bmsSide;
   const fr = edgeFrame(layout.width, layout.height, side);
@@ -50,6 +51,62 @@ export function harnessRoutes(layout, o = {}) {
     routes.push({ name, k: null, kind: 'power', surface: surfaceOf(b), color, points: [t, fr.point(fr.along(t) + sign * dir * delta, exitOff), pin] });
   }
   return { side, dir, bms, pins, routes, quality: layout.harness?.quality ?? 'clean' };
+}
+
+/** Траси центральним каналом U-розкладки до BMS на відкритому кінці (ліворуч). */
+function channelRoutes(layout, o) {
+  const S = layout.S;
+  const yB = layout.harness.boundaryY;
+  const fr = edgeFrame(layout.width, layout.height, 'left');
+  const gap = o.gap ?? 15, thick = o.thick ?? 4;
+  const n = S + 3;
+  const lb = Math.max(fr.len * 0.8, n * (o.minPitch ?? 0));
+  const a0 = Math.max(Math.min(yB - lb / 2, layout.height - lb), Math.min(0, layout.height - lb));
+  const slotA = (i) => a0 + (i + 0.5) * (lb / n);
+  const p1 = fr.point(a0, gap), p2 = fr.point(a0 + lb, gap + thick);
+  const bms = { x: Math.min(p1[0], p2[0]), y: Math.min(p1[1], p2[1]), w: Math.abs(p2[0] - p1[0]), h: Math.abs(p2[1] - p1[1]) };
+  const exitOff = gap * 0.45;
+  const surfaceOf = (bus) => (layout.shape === 'prism' ? 'both' : bus.side);
+  const eps = harnessGap(layout) * 0.3;
+  const items = [];
+  for (const b of layout.buses) {
+    const t = terminalPoint(layout, layout.cells[b.tap], b.side);
+    items.push({ name: `B${b.index}`, k: b.index, kind: 'balance', surface: surfaceOf(b), color: wireColor(b.index), t, x: t[0], slot: b.index + 1 });
+  }
+  for (const [b, name, slot, sign, color] of [[layout.buses[0], 'P−', 0, -1, '#1d232b'], [layout.buses[S], 'P+', S + 2, -1, '#d93636']]) {
+    const t = terminalPoint(layout, layout.cells[b.power], b.side);
+    items.push({ name, k: null, kind: 'power', surface: surfaceOf(b), color, t, x: t[0] + sign * eps, slot });
+  }
+  const routes = [];
+  const pins = {};
+  for (const surf of [...new Set(items.map((i) => i.surface))]) {
+    const list = items.filter((i) => i.surface === surf);
+    const top = list.filter((i) => i.t[1] < yB).sort((a, b) => a.x - b.x || a.slot - b.slot);
+    const bot = list.filter((i) => i.t[1] >= yB).sort((a, b) => a.x - b.x || b.slot - a.slot);
+    // уся смуга доріжок має вміститися між найближчою точкою підключення і каналом
+    const roomTop = top.length ? yB - Math.max(...top.map((i) => i.t[1])) : Infinity;
+    const roomBot = bot.length ? Math.min(...bot.map((i) => i.t[1])) - yB : Infinity;
+    const dTop = Math.min(harnessGap(layout) * 0.35, 2.5, roomTop / (top.length + 1));
+    const dBot = Math.min(harnessGap(layout) * 0.35, 2.5, roomBot / (bot.length + 1));
+    top.forEach((it, i) => { it.lane = yB - dTop * (top.length - i); });
+    bot.forEach((it, i) => { it.lane = yB + dBot * (bot.length - i); });
+    // кілька дротів з однієї координати (наприклад, дві клеми однієї комірки) — розводимо
+    // трохи вбік у порядку доріжок, щоб вертикальні ділянки не накладались і не перетинались
+    const spread = Math.min(harnessGap(layout) * 0.3, 1.5);
+    for (const grp of [top, bot])
+      for (let i = 0; i < grp.length;) {
+        let j = i;
+        while (j + 1 < grp.length && Math.abs(grp[j + 1].x - grp[i].x) < 1e-6) j++;
+        for (let k = i; k <= j; k++) grp[k].x += (k - (i + j) / 2) * spread;
+        i = j + 1;
+      }
+    for (const it of list) {
+      const pin = fr.point(slotA(it.slot), gap);
+      pins[it.name] = pin;
+      routes.push({ name: it.name, k: it.k, kind: it.kind, surface: it.surface, color: it.color, points: [it.t, [it.x, it.lane], [-exitOff, it.lane], pin] });
+    }
+  }
+  return { side: 'left', dir: 1, bms, pins, routes, quality: 'clean', mode: 'channel' };
 }
 
 export const polylineLength = (pts) => pts.slice(1).reduce((s, p, i) => s + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0);
@@ -133,16 +190,19 @@ export function routeCrossings(routes) {
 
 /**
  * Злиття колінеарних перемичок однієї шини в суцільні відрізки (шматки стрічки).
- * @returns {{bus, side, a:[x,y], b:[x,y], len, links:number}[]}
+ * Послідовні й паралельні перемички зливаються окремо (можуть бути з різного матеріалу);
+ * дроти-перемички — це не стрічка, вони не враховуються.
+ * @param {'all'|'series'|'parallel'} [kind]
+ * @returns {{bus, side, a:[x,y], b:[x,y], len, links:number, series:boolean}[]}
  */
-export function stripRuns(layout) {
+export function stripRuns(layout, kind = 'all') {
   const runs = [];
   for (const bus of layout.buses) {
-    const segs = bus.links.map((l) => {
+    const segs = bus.links.filter((l) => !l.jumper && (kind === 'all' || (kind === 'series') === !!l.series)).map((l) => {
       let p = terminalPoint(layout, layout.cells[l.a], bus.side), q = terminalPoint(layout, layout.cells[l.b], bus.side);
       if (p[0] > q[0] + 1e-6 || (Math.abs(p[0] - q[0]) <= 1e-6 && p[1] > q[1])) [p, q] = [q, p];
       const ang = Math.atan2(q[1] - p[1], q[0] - p[0]);
-      return { p, q, ang };
+      return { p, q, ang, series: !!l.series };
     });
     const used = new Array(segs.length).fill(false);
     for (let i = 0; i < segs.length; i++) {
@@ -155,12 +215,12 @@ export function stripRuns(layout) {
       while (grew) {
         grew = false;
         for (let j = 0; j < segs.length; j++) {
-          if (used[j] || Math.abs(segs[j].ang - ang) > 1e-3) continue;
+          if (used[j] || Math.abs(segs[j].ang - ang) > 1e-3 || (kind === 'all' ? false : segs[j].series !== segs[i].series)) continue;
           if (same(segs[j].p, q)) { q = segs[j].q; used[j] = true; count++; grew = true; }
           else if (same(segs[j].q, p)) { p = segs[j].p; used[j] = true; count++; grew = true; }
         }
       }
-      runs.push({ bus: bus.index, side: bus.side, a: p, b: q, len: Math.hypot(q[0] - p[0], q[1] - p[1]), links: count });
+      runs.push({ bus: bus.index, side: bus.side, a: p, b: q, len: Math.hypot(q[0] - p[0], q[1] - p[1]), links: count, series: segs[i].series });
     }
   }
   return runs;
@@ -183,23 +243,25 @@ export function cutList(runs, overlap) {
 /**
  * Перевірка оголених шин: зазор між перемичками різних шин на одній поверхні
  * та проходження перемички над клемою комірки, що належить іншій шині.
- * @param {number} width ширина стрічки/шини, мм
+ * @param {number} width ширина стрічки/шини, мм (або { parallel, series })
  * @param {number} [clearance] мінімально допустимий зазор, мм
  */
 export function stripClearance(layout, width, clearance = 1) {
+  const wOf = (l) => (typeof width === 'number' ? width : l.series ? width.series : width.parallel);
   const cyl = layout.shape === 'cyl';
   const surf = (b) => (cyl ? b.side : 'both');
   const segs = [];
+  // оголені шини одного ярусу (дроти-перемички ізольовані — не перевіряємо)
   for (const b of layout.buses)
     for (const l of b.links)
-      segs.push({ bus: b.index, surface: surf(b), a: terminalPoint(layout, layout.cells[l.a], b.side), b: terminalPoint(layout, layout.cells[l.b], b.side) });
+      if (!l.jumper) segs.push({ bus: b.index, surface: surf(b), w: wOf(l), a: terminalPoint(layout, layout.cells[l.a], b.side), b: terminalPoint(layout, layout.cells[l.b], b.side) });
   let minGap = Infinity, worst = null;
   const violations = [];
   for (let i = 0; i < segs.length; i++)
     for (let j = i + 1; j < segs.length; j++) {
       const A = segs[i], B = segs[j];
       if (A.surface !== B.surface || A.bus === B.bus) continue;
-      const g = segmentDistance(A.a, A.b, B.a, B.b) - width;
+      const g = segmentDistance(A.a, A.b, B.a, B.b) - (A.w + B.w) / 2;
       if (g < minGap) { minGap = g; worst = [A.bus, B.bus]; }
       if (g < clearance) violations.push({ kind: 'strips', buses: [A.bus, B.bus], gap: g });
     }
@@ -211,7 +273,7 @@ export function stripClearance(layout, width, clearance = 1) {
   for (const s of segs)
     for (const t of terminals) {
       if (t.surface !== s.surface || t.bus === s.bus) continue;
-      if (pointSegDist(t.p, s.a, s.b) < width / 2 + termR) violations.push({ kind: 'terminal', buses: [s.bus, t.bus], cell: t.id });
+      if (pointSegDist(t.p, s.a, s.b) < s.w / 2 + termR) violations.push({ kind: 'terminal', buses: [s.bus, t.bus], cell: t.id });
     }
   return { minGap: minGap === Infinity ? null : minGap, worst, violations };
 }

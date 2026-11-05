@@ -178,9 +178,139 @@ export function checkConfig(box, cell, S, P, opt = {}) {
 export function requiredBox(layout, cell, opt = {}) {
   const margin = opt.margin ?? 2;
   const depthReserve = opt.depthReserve ?? 4;
+  const layers = layout.layers || 1;
   return {
     a: layout.width + 2 * margin,
-    b: layout.height + 2 * margin,
-    depth: cell.h + depthReserve + 2 * margin,
+    b: (layers > 1 ? layout.layerHeight : layout.height) + 2 * margin,
+    depth: layers * cell.h + (layers - 1) * (layout.layerGapPhys ?? 4) + depthReserve + 2 * margin,
   };
+}
+
+// ------------------------------------------------------------------ довільна форма
+
+/**
+ * Контур форми (у мм, вісь y — донизу).
+ * triangle: a — основа (низ), b — висота, x — положення вершини від лівого кінця основи
+ * trapezoid: a — низ, c — верх, b — висота, x — зсув верхньої сторони від лівого краю
+ * polygon: points — масив [x, y]
+ */
+export function shapeOutline(shape) {
+  if (!shape) return null;
+  const a = +shape.a || 0, b = +shape.b || 0, c = +shape.c || 0, x = +shape.x || 0;
+  if (shape.type === 'triangle') return [[0, b], [a, b], [x, 0]];
+  if (shape.type === 'trapezoid') return [[0, b], [a, b], [x + c, 0], [x, 0]];
+  if (shape.type === 'polygon') return (shape.points || []).filter((p) => p.length >= 2 && p.every(Number.isFinite));
+  return null;
+}
+
+/** Розбір тексту «x, y» по рядках у масив точок. */
+export function parsePolygon(text) {
+  return String(text).split(/\n|;/).map((l) => l.trim()).filter(Boolean)
+    .map((l) => l.split(/[\s,]+/).map((v) => parseFloat(v.replace(',', '.'))))
+    .filter((p) => p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+    .map((p) => [p[0], p[1]]);
+}
+
+export function polygonArea(poly) {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) { const [x1, y1] = poly[i], [x2, y2] = poly[(i + 1) % poly.length]; s += x1 * y2 - x2 * y1; }
+  return Math.abs(s) / 2;
+}
+
+export function pointInPolygon([x, y], poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function distToSegment([px, py], [ax, ay], [bx, by]) {
+  const dx = bx - ax, dy = by - ay;
+  const L2 = dx * dx + dy * dy;
+  const t = L2 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / L2)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/** Чи поміщається коло радіуса r (з відступом) повністю всередині багатокутника. */
+export function circleInPolygon(p, r, poly) {
+  if (!pointInPolygon(p, poly)) return false;
+  for (let i = 0; i < poly.length; i++) if (distToSegment(p, poly[i], poly[(i + 1) % poly.length]) < r - 1e-9) return false;
+  return true;
+}
+
+/**
+ * Вписування циліндричних комірок у багатокутник (переріз, перпендикулярний осі комірок).
+ * Перебирає сітку і стільники, кути повороту решітки та її зсув — обирає максимум комірок.
+ * @param {number[][]} poly контур, мм
+ * @param {object} cell
+ * @param {{gap?:number, margin?:number}} opt
+ * @returns {{arrangement, angle, count, slots:{x,y,row,col}[]}[]} варіанти від найкращого
+ */
+export function fitPolygon(poly, cell, opt = {}) {
+  if (cell.shape !== 'cyl' || !poly || poly.length < 3) return [];
+  const gap = opt.gap ?? 0.5, margin = opt.margin ?? 2;
+  const r = cell.d / 2;
+  const p = cell.d + gap;
+  const xs = poly.map((q) => q[0]), ys = poly.map((q) => q[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.hypot(maxX - minX, maxY - minY);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const out = [];
+  for (const arrangement of ['grid', 'honeycomb']) {
+    const angles = arrangement === 'grid' ? [0, 15, 30, 45, 60, 75] : [0, 10, 20, 30, 40, 50];
+    let best = null;
+    for (const deg of angles) {
+      const t = (deg * Math.PI) / 180;
+      const u = [p * Math.cos(t), p * Math.sin(t)];
+      const v = arrangement === 'grid'
+        ? [-p * Math.sin(t), p * Math.cos(t)]
+        : [p * (0.5 * Math.cos(t) - SQRT3_2 * Math.sin(t)), p * (0.5 * Math.sin(t) + SQRT3_2 * Math.cos(t))];
+      const n = Math.ceil(span / (p * (arrangement === 'grid' ? 1 : SQRT3_2))) + 2;
+      const steps = 6;
+      for (let oi = 0; oi < steps; oi++)
+        for (let oj = 0; oj < steps; oj++) {
+          const ox = cx + (oi / steps) * u[0] + (oj / steps) * v[0];
+          const oy = cy + (oi / steps) * u[1] + (oj / steps) * v[1];
+          const slots = [];
+          for (let j = -n; j <= n; j++)
+            for (let i = -n; i <= n; i++) {
+              const x = ox + i * u[0] + j * v[0], y = oy + i * u[1] + j * v[1];
+              if (x < minX || x > maxX || y < minY || y > maxY) continue;
+              if (circleInPolygon([x, y], r + margin, poly)) slots.push({ x, y, row: j, col: i });
+            }
+          if (!best || slots.length > best.count) best = { arrangement, angle: deg, count: slots.length, slots };
+        }
+    }
+    if (best && best.count) out.push(best);
+  }
+  return out.sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Підбір S×P для довільної форми.
+ * @param {{outline:number[][], depth:number}} shape контур і глибина (уздовж осі комірок)
+ */
+export function bestConfigsShape(shape, cell, opt = {}, sRange = [1, 24]) {
+  const poly = shape.outline;
+  const margin = opt.margin ?? 2, reserve = opt.depthReserve ?? 4, layerGap = opt.layerGap ?? 2;
+  const D = (shape.depth || 0) - 2 * margin;
+  const len = cell.h + reserve;
+  const variants = D >= len ? fitPolygon(poly, cell, opt) : [];
+  const maxLayers = opt.allowLayers ? Math.max(1, Math.floor((D + layerGap) / (len + layerGap) + 1e-9)) : 1;
+  const xs = poly.map((q) => q[0]), ys = poly.map((q) => q[1]);
+  const planeA = Math.max(...xs) - Math.min(...xs), planeB = Math.max(...ys) - Math.min(...ys);
+  const configs = [];
+  for (let S = sRange[0]; S <= sRange[1]; S++) {
+    let best = null;
+    for (const v of variants)
+      for (let k = 1; k <= Math.min(maxLayers, S); k++) {
+        const Sl = Math.ceil(S / k);
+        const P = Math.floor(v.count / Sl);
+        if (P >= 1 && (!best || P > best.P)) best = { S, P, layers: k, layerS: Sl, rows: null, layout: { ...v, perLayer: v.count, layers: maxLayers, total: v.count * maxLayers, orientation: 'вісь комірок — уздовж товщини', cols: v.count, rows: 1, planeA, planeB, aAxis: 'X', bAxis: 'Y', depth: shape.depth, shape: true } };
+      }
+    if (best) configs.push(best);
+  }
+  return { variants, configs, maxLayers };
 }

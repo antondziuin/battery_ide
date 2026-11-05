@@ -153,6 +153,10 @@ button.wide { width: 100%; margin-top: 4px; }
 .mode-hint { margin: 2px 0 8px; }
 #bomTable td:first-child, #bomTable td:last-child { white-space: normal; }
 #bomTable td:last-child { min-width: 140px; }
+.preset-note { margin: -6px 0 10px; }
+.shape-badge { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--accent-2); color: var(--accent); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px; font-size: 12px; font-weight: 600; }
+.shape-badge button { padding: 3px 8px; font-size: 12px; }
+.warn.note { background: var(--accent-2); color: var(--accent); }
 .side-hint { margin: -4px 0 8px; color: var(--text); }
 .view3d { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .v3d-toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }

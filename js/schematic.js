@@ -107,10 +107,9 @@ export function renderBmsSchematic(plan, cell, load = 0) {
       const y = yS - (i + 1) * pinStep;
       s += dot(bmsX, y, '#adb5bd', 3);
       s += text(bmsX + 8, y + 4, `B${S + i + 1}`, { size: 9, color: '#868e96' });
-      if (plan.type === 'smart') wire(`B${S}`, [[bmsX, y], [bmsX - 18, y], [bmsX - 18, yS]], '#868e96', 1.2, 'stroke-dasharray="3 2"');
-      else s += line(bmsX - 6, y - 4, bmsX + 2, y + 4, C.bad, 1.5) + line(bmsX - 6, y + 4, bmsX + 2, y - 4, C.bad, 1.5);
+      if (plan.type !== 'smart') s += line(bmsX - 6, y - 4, bmsX + 2, y + 4, C.bad, 1.5) + line(bmsX - 6, y + 4, bmsX + 2, y - 4, C.bad, 1.5);
     }
-    if (plan.type === 'smart') s += dot(bmsX - 18, yS, '#868e96', 2.5);
+    s += text(bmsX - 6, yS - unusedN * pinStep - 4, plan.type === 'smart' ? 'зайві піни: за схемою виробника' : 'апаратна BMS ≠ S', { size: 9, anchor: 'end', color: plan.type === 'smart' ? '#868e96' : C.bad });
     if (plan.unused > unusedN) s += text(bmsX + 8, yS - (unusedN + 1) * pinStep + 4, `… ще ${plan.unused - unusedN}`, { size: 9, color: '#868e96' });
   }
   const cx = bmsX + bmsW / 2 + 16;

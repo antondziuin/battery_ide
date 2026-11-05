@@ -105,7 +105,7 @@ export async function createViewer(host, tooltip) {
       for (const it of desc.items) {
         if (it.kind !== 'cell') continue;
         const g = new THREE.Group();
-        g.position.set(it.x, 0, it.z);
+        g.position.set(it.x, it.y0 || 0, it.z);
         const m = new THREE.Mesh(body, mat(groupColor(it.group, 62)));
         m.position.y = h / 2;
         m.userData.info = info(it);
@@ -127,7 +127,7 @@ export async function createViewer(host, tooltip) {
       for (const it of desc.items) {
         if (it.kind !== 'cell') continue;
         const m = new THREE.Mesh(box, mat(groupColor(it.group, 62)));
-        m.position.set(it.x, h / 2, it.z);
+        m.position.set(it.x, (it.y0 || 0) + h / 2, it.z);
         m.userData.info = info(it);
         cellMeshes.push(m);
         root.add(m);
@@ -135,7 +135,7 @@ export async function createViewer(host, tooltip) {
         for (const side of ['top', 'bottom']) {
           const plus = side === 'top' ? it.plusTop : !it.plusTop;
           const s = new THREE.Mesh(stud, mat(plus ? '#d93636' : '#2b2f36', { metalness: 0.4 }));
-          s.position.set(t[side][0], h + 3, t[side][1]);
+          s.position.set(t[side][0], (it.y0 || 0) + h + 3, t[side][1]);
           root.add(s);
         }
       }
@@ -184,6 +184,29 @@ export async function createViewer(host, tooltip) {
     // корпус
     for (const it of desc.items) {
       if (it.kind !== 'enclosure') continue;
+      if (it.outline && it.outline.length >= 3) {
+        // корпус довільної форми: витягнутий контур (каркас + напівпрозорі грані)
+        const y0 = it.y - it.sy / 2, y1 = it.y + it.sy / 2;
+        const shape = new THREE.Shape(it.outline.map(([x, z]) => new THREE.Vector2(x, -z)));
+        const eg = keep(new THREE.ExtrudeGeometry(shape, { depth: it.sy, bevelEnabled: false }));
+        const faces = new THREE.Mesh(eg, new THREE.MeshBasicMaterial({ color: 0x2456c7, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide }));
+        faces.rotation.x = -Math.PI / 2;
+        faces.position.y = y0;
+        disposables.push(faces.material);
+        root.add(faces);
+        const pts = [];
+        const n = it.outline.length;
+        for (let k = 0; k < n; k++) {
+          const [ax, az] = it.outline[k], [bx, bz] = it.outline[(k + 1) % n];
+          pts.push(ax, y0, az, bx, y0, bz, ax, y1, az, bx, y1, bz, ax, y0, az, ax, y1, az);
+        }
+        const lg = keep(new THREE.BufferGeometry());
+        lg.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+        const lines = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: 0x2456c7 }));
+        disposables.push(lines.material);
+        root.add(lines);
+        continue;
+      }
       const g = keep(new THREE.BoxGeometry(it.sx, it.sy, it.sz));
       const faces = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x2456c7, transparent: true, opacity: 0.06, depthWrite: false }));
       faces.position.set(it.x, it.y, it.z);

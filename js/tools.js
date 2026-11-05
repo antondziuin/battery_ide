@@ -111,9 +111,14 @@ export function sizePack(cell, t) {
   if (t.mode === 'max') S = Math.max(1, Math.floor(t.voltage / cell.vMax + 1e-9));
   else if (t.mode === 'min') S = Math.max(1, Math.ceil(t.voltage / cell.vMin - 1e-9));
   else S = Math.max(1, Math.round(ratio));
+  const reasons = [];
+  // LiFePO4 «48 В»: стандарт — 16S (51,2 В), а не 15S, що дає просте округлення 48 / 3,2
+  if (t.mode !== 'max' && t.mode !== 'min' && cell.chem === 'LiFePO4' && t.voltage >= 44 && t.voltage <= 54) {
+    if (S !== 16) reasons.push('16S — стандарт LiFePO4 для 48 В інверторів');
+    S = 16;
+  }
   const vNom = S * cell.vNom;
   const needAh = Math.max(t.ah || 0, t.wh ? t.wh / vNom : 0);
-  const reasons = [];
   let P = 1;
   if (needAh) { const p = Math.ceil(needAh / cell.capacity - 1e-9); if (p > P) P = p; reasons.push(`ємність: ${p}P`); }
   if (t.current) { const p = Math.ceil(t.current / cell.iMax - 1e-9); if (p > P) P = p; reasons.push(`тривалий струм: ${p}P`); }
