@@ -45,10 +45,20 @@
             <input id="inP" type="number" min="1" max="60" value="3">
           </label>
         </div>
-        <div class="presets" id="presets"></div>
-        <div class="row2">
+        <label>Типова збірка
+          <select id="presetSel"><option value="">— обрати пресет —</option></select>
+        </label>
+        <p class="hint preset-note" id="presetNote"></p>
+        <div class="shape-badge" id="shapeBadge" hidden>
+          <span id="shapeBadgeText"></span>
+          <button class="ghost" id="shapeReset" type="button" title="Повернутися до прямокутної розкладки">Скинути форму</button>
+        </div>
+        <div class="row3">
           <label>Рядів
             <input id="inRows" type="number" min="1" max="200" placeholder="авто">
+          </label>
+          <label>Ярусів
+            <input id="inLayers" type="number" min="1" max="4" value="1" title="Яруси вздовж осі комірок: групи діляться між ярусами, що стоять один на одному">
           </label>
           <label>Зазор, мм
             <input id="inGap" type="number" min="0" max="20" step="0.1" value="0.5">
@@ -103,6 +113,7 @@
             <select id="inLead">
               <option value="near">Біля BMS</option>
               <option value="center">Центр крайньої групи</option>
+              <option value="collector">Мідна збірна шина по групі</option>
             </select>
           </label>
         </div>
@@ -110,7 +121,7 @@
         <button id="toBms" class="ghost wide" type="button">Налаштування BMS і схема підключення →</button>
 
         <h3>Перемички</h3>
-        <label>Матеріал
+        <label>Матеріал (паралельні та всі, якщо не задано окремо)
           <select id="inStripMat"></select>
         </label>
         <div class="row3">
@@ -123,6 +134,18 @@
           <label>Шарів
             <input id="inStripL" type="number" min="1" max="6" value="1">
           </label>
+        </div>
+        <label class="check"><input id="inSerSame" type="checkbox"> Послідовні перемички — такі самі</label>
+        <div id="serStripBox">
+          <p class="hint">Послідовні перемички (між групами) несуть увесь струм навантаження — їх роблять товщими або мідними.</p>
+          <label>Матеріал послідовних
+            <select id="inSerMat"></select>
+          </label>
+          <div class="row3">
+            <label>Ширина, мм<input id="inSerW" type="number" min="1" step="0.5"></label>
+            <label>Товщина, мм<input id="inSerT" type="number" min="0.05" step="0.05"></label>
+            <label>Шарів<input id="inSerL" type="number" min="1" max="6"></label>
+          </div>
         </div>
 
         <div class="btn-row">
@@ -243,6 +266,7 @@
             <select id="bmsLead2">
               <option value="near">Біля BMS</option>
               <option value="center">Центр групи</option>
+              <option value="collector">Мідна збірна шина по групі</option>
             </select>
           </label>
         </div>
@@ -293,11 +317,46 @@
       <aside class="panel controls">
         <h2>Корпус</h2>
         <p class="hint">Внутрішні розміри корпусу. Комірка береться з конструктора.</p>
-        <div class="row3">
+        <label>Форма
+          <select id="fitShape">
+            <option value="box">Прямокутний (L × W × H)</option>
+            <option value="triangle">Трикутник (рама велосипеда)</option>
+            <option value="trapezoid">Трапеція</option>
+            <option value="polygon">Довільний контур</option>
+          </select>
+        </label>
+        <div class="row3" id="shapeBox">
           <label>L, мм<input id="boxL" type="number" min="1" value="150"></label>
           <label>W, мм<input id="boxW" type="number" min="1" value="90"></label>
           <label>H, мм<input id="boxH" type="number" min="1" value="75"></label>
         </div>
+        <div id="shapeTri" hidden>
+          <div class="row3">
+            <label>Основа, мм<input id="triA" type="number" min="1"></label>
+            <label>Висота, мм<input id="triB" type="number" min="1"></label>
+            <label>Вершина від лівого краю, мм<input id="triX" type="number"></label>
+          </div>
+        </div>
+        <div id="shapeTrap" hidden>
+          <div class="row2">
+            <label>Низ, мм<input id="trapA" type="number" min="1"></label>
+            <label>Верх, мм<input id="trapC" type="number" min="1"></label>
+          </div>
+          <div class="row2">
+            <label>Висота, мм<input id="trapB" type="number" min="1"></label>
+            <label>Зсув верху від лівого краю, мм<input id="trapX" type="number"></label>
+          </div>
+        </div>
+        <div id="shapePoly" hidden>
+          <label>Контур: точки «x, y» по рядках (мм, y — донизу)
+            <textarea id="fitPoly" rows="6" spellcheck="false"></textarea>
+          </label>
+        </div>
+        <div id="shapeThick" hidden>
+          <label>Товщина (уздовж осі комірок), мм<input id="fitThick" type="number" min="1"></label>
+          <p class="hint">Площина форми — переріз корпусу; комірки лежать віссю поперек (уздовж товщини), як у трикутних сумках на раму.</p>
+        </div>
+
         <div class="row2">
           <label>Відступ від стінок, мм<input id="fitMargin" type="number" min="0" step="0.5" value="2"></label>
           <label>Зазор між комірками, мм<input id="fitGap" type="number" min="0" step="0.1" value="0.5"></label>

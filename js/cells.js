@@ -2,6 +2,8 @@
 // Значення орієнтовні (за типовими даташитами) — перевіряйте даташит вашої партії.
 //
 // shape: 'cyl' — циліндрична (d — діаметр, h — висота)
+// Для призматичних: torque — момент затягування клем, Н·м; compression — рекомендоване
+// стискання пакета [від, до], кН (орієнтовно, за повідомленнями збирачів і тест-нотою виробника).
 //        'prism' — призматична (w — ширина, з клемами; t — товщина; h — висота)
 
 export const BUILTIN_CELLS = [
@@ -25,7 +27,7 @@ export const BUILTIN_CELLS = [
   { id: '18650-lto', format: '18650', name: '18650 LTO 1300 мА·год', shape: 'cyl', d: 18.3, h: 65.0, capacity: 1.3, vNom: 2.4, vMax: 2.8, vMin: 1.5, iMax: 13, mass: 40, ir: 20, chem: 'LTO' },
   // призматичні
   { id: 'eve-lf105', format: 'Призматична', name: 'EVE LF105 (105 А·год)', shape: 'prism', w: 130.3, t: 36.3, h: 200.5, capacity: 105, vNom: 3.2, vMax: 3.65, vMin: 2.5, iMax: 105, mass: 1980, ir: 0.4, chem: 'LiFePO4' },
-  { id: 'eve-lf280k', format: 'Призматична', name: 'EVE LF280K (280 А·год)', shape: 'prism', w: 173.7, t: 71.7, h: 207.2, capacity: 280, vNom: 3.2, vMax: 3.65, vMin: 2.5, iMax: 200, mass: 5490, ir: 0.25, chem: 'LiFePO4' },
+  { id: 'eve-lf280k', format: 'Призматична', name: 'EVE LF280K (280 А·год)', shape: 'prism', w: 173.7, t: 71.7, h: 207.2, capacity: 280, vNom: 3.2, vMax: 3.65, vMin: 2.5, iMax: 200, mass: 5490, ir: 0.25, chem: 'LiFePO4', torque: 4, compression: [3, 7] },
   { id: 'calb-l173f100', format: 'Призматична', name: 'Призматична 100 А·год (типова)', shape: 'prism', w: 160, t: 50, h: 118, capacity: 100, vNom: 3.2, vMax: 3.65, vMin: 2.5, iMax: 100, mass: 1950, ir: 0.5, chem: 'LiFePO4' },
 ];
 

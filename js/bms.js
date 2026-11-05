@@ -2,7 +2,7 @@
 
 import { wireCalc } from './tools.js';
 import { harnessRoutes, polylineLength, routeConflicts, wireColor } from './routing.js';
-import { BMS_SIDE_NAMES } from './layout.js';
+import { BMS_SIDE_NAMES, cellPlace } from './layout.js';
 
 export { wireColor };
 
@@ -104,7 +104,7 @@ export function bmsPlan(cell, layout, cfg, load) {
       name: `B${k}`,
       color: wireColor(k),
       role: k === 0 ? 'мінус групи 1 (мінус пакета)' : k === S ? `плюс групи ${k} (плюс пакета)` : `плюс групи ${k} / мінус групи ${k + 1}`,
-      where: `група ${groupNo} «${terminal}», ряд ${c.row + 1}, стовпець ${c.col + 1}, ${sideName}`,
+      where: `група ${groupNo} «${terminal}», ${cellPlace(layout, c)}, ${sideName}`,
       cellId: c.id,
       vMin: k * cell.vMin, vNom: k * cell.vNom, vMax: k * cell.vMax,
       length: Math.round((routeLen[`B${k}`] + drop + 40) / 10) * 10, // мм, за трасою + запас
@@ -127,7 +127,7 @@ export function bmsPlan(cell, layout, cfg, load) {
   else if (channels > S && cfg.type === 'hardware')
     add('bad', `Апаратна BMS на ${channels}S розрахована саме на ${channels} груп. Для ${S}S купуйте BMS на ${S}S або розумну BMS з налаштуванням кількості комірок.`);
   else if (channels > S)
-    add('warn', `У BMS ${channels} каналів, використовується ${S}. Задайте кількість комірок ${S} у налаштуваннях; невикористані дроти B${S + 1}…B${channels} зазвичай з'єднують з B${S} — звіртеся з інструкцією виробника.`);
+    add('warn', `У BMS ${channels} каналів, використовується ${S}. Задайте кількість комірок ${S} у налаштуваннях. Що робити з дротами B${S + 1}…B${channels}, залежить від моделі: у частини BMS їх не підключають, в інших з'єднують з B${S}. Дивіться схему виробника саме для вашої моделі.`);
   else add('ok', `Кількість каналів BMS збігається з ${S}S.`);
 
   if (loadA > 0 && bmsCurrent < loadA * 1.1) add('bad', `Тривалий струм BMS ${bmsCurrent} А замалий для навантаження ${loadA} А (потрібно від ${recCurrent} А).`);
@@ -159,7 +159,7 @@ export function bmsPlan(cell, layout, cfg, load) {
     `Приваріть/припаяйте силовий дріт B− (${power.recommended ? power.recommended.awg + ' AWG' : 'див. перетин'}) до мінуса пакета (точка P−) та під'єднайте до B− на BMS.`,
     `Припаяйте балансувальні дроти по черзі B0 → B${S}, кожен до своєї шини (див. таблицю). Довжини — з запасом, без натягу.`,
     `Не підключаючи роз'єм до BMS, перевірте мультиметром: між сусідніми пінами ≈ ${cell.vNom} В (${cell.vMin}–${cell.vMax}), між B0 і Bk — наростання на ≈ ${cell.vNom} В з кожним кроком.`,
-    'Під\'єднайте роз\'єм до BMS (якщо інструкція не вимагає іншого порядку). Невикористані піни — згідно з інструкцією.',
+    'Під\'єднайте роз\'єм до BMS (якщо інструкція не вимагає іншого порядку). Деякі плати не використовують перший пін B− роз\'єму, а зайві піни залежно від моделі або не підключають, або з\'єднують з останнім Bn — перевірте схему виробника.',
     cfg.port === 'separate'
       ? 'Під\'єднайте навантаження до P+ та P−, зарядний порт — до P+ та C−.'
       : 'Під\'єднайте навантаження й зарядний порт до P+ та P−.',

@@ -368,9 +368,14 @@ test('режими 2D-схеми показують лише потрібне', 
   for (const s of [scheme, asm, cells, top, bottom, cur, wir]) assert.ok(!/NaN|undefined|Infinity/.test(s));
 });
 
-test('схема попереджає про стик груп в одну комірку', () => {
+test('стик груп в одну комірку підсилюється другою перемичкою', () => {
   const L = generateLayout({ S: 13, P: 4, rows: 8, arrangement: 'grid', snake: 'u', gap: 0.5, cell: c21700 });
-  assert.ok(renderPackSVG(L, { mode: 'scheme' }).includes('1 контакт!'));
+  assert.ok(L.jumperNotes.some((n) => n.includes('лише однією коміркою')));
+  assert.ok(L.buses.slice(1, 13).every((b) => b.seriesLinks >= 2));
+  assert.ok(!renderPackSVG(L, { mode: 'scheme' }).includes('1 контакт!'));
+  // для P < 3 підсилення не додається — схема лише попереджає
+  const L2 = generateLayout({ S: 7, P: 2, rows: 4, arrangement: 'grid', snake: 'u', gap: 0.5, cell: c21700 });
+  if (L2.buses.slice(1, 7).some((b) => b.seriesLinks === 1)) assert.ok(renderPackSVG(L2, { mode: 'scheme' }).includes('1 контакт!'));
   const ok = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700 });
   assert.ok(!renderPackSVG(ok, { mode: 'scheme' }).includes('1 контакт!'));
 });
@@ -516,4 +521,161 @@ test('3D: дроти — ламані за тими ж трасами, що й �
   const top = wires.filter((w) => w.points[0][1] > c21700.h), bottom = wires.filter((w) => w.points[0][1] < 0);
   assert.ok(top.length && bottom.length);
   assert.ok(Math.min(...top.map((w) => w.points[3][1])) > Math.max(...bottom.map((w) => w.points[3][1])));
+});
+
+// ------------------------------------------------------------------ пресети, форми, яруси, перемички
+import { PRESETS } from '../js/presets.js';
+import { shapeOutline, parsePolygon, fitPolygon, bestConfigsShape, circleInPolygon, polygonArea } from '../js/fit.js';
+
+const cellById = (id) => BUILTIN_CELLS.find((c) => c.id === id);
+
+test('пресети: існуючі комірки, коректна розкладка, дроти без перетинів', () => {
+  assert.ok(PRESETS.length >= 10);
+  for (const p of PRESETS) {
+    const cell = cellById(p.cell);
+    assert.ok(cell, `${p.id}: комірка ${p.cell}`);
+    let slots = null, outline = null;
+    if (p.shape) {
+      outline = shapeOutline(p.shape);
+      const v = fitPolygon(outline, cell, { gap: 0.5, margin: 2 })[0];
+      assert.ok(v.count >= p.S * p.P, `${p.id}: у форму вміщується ${v.count}`);
+      slots = v.slots;
+    }
+    const L = generateLayout({ S: p.S, P: p.P, rows: p.rows, arrangement: p.arrangement || 'grid', snake: p.snake || 'cols', gap: 0.5, cell, leadAttach: p.lead, slots, outline });
+    assert.deepEqual(L.warnings, [], p.id);
+    const c = routeConflicts(harnessRoutes(L, { gap: 15, thick: 4 }).routes);
+    assert.equal(c.crossings.length, 0, `${p.id}: перетини ${JSON.stringify(c.crossings)}`);
+    const a = analyzeCurrents(L, cell, { load: p.load, strip: p.strip || strip, seriesStrip: p.ser && !p.ser.same ? p.ser : null });
+    assert.ok(a.ok, p.id);
+    for (let g = 0; g < p.S; g++) {
+      const sum = L.cells.filter((x) => x.group === g).reduce((s, x) => s + a.cellI[x.id], 0);
+      assert.ok(Math.abs(sum - p.load) < 1e-6, `${p.id} група ${g + 1}`);
+    }
+  }
+});
+
+test('LiFePO4 48 В: підбір дає 16S; призматичні 2×8 — розвернутий ряд, шини без конфліктів, дроти каналом', () => {
+  const lf = cellById('eve-lf280k');
+  assert.equal(sizePack(lf, { voltage: 48, mode: 'nearest' }).S, 16);
+  assert.equal(sizePack(lf, { voltage: 24, mode: 'nearest' }).S, 8);
+  assert.equal(sizePack(lf, { voltage: 12, mode: 'nearest' }).S, 4);
+  const L = generateLayout({ S: 16, P: 1, rows: 2, snake: 'u', arrangement: 'grid', gap: 1, cell: lf });
+  assert.ok(L.cells.filter((c) => c.row === 1).every((c) => c.flip) && L.cells.filter((c) => c.row === 0).every((c) => !c.flip));
+  assert.equal(stripClearance(L, Math.min(lf.t, lf.w) * 0.3, 1).violations.length, 0);
+  assert.equal(L.harness.mode, 'channel');
+  const c = routeConflicts(harnessRoutes(L, { gap: 15, thick: 4 }).routes);
+  assert.equal(c.crossings.length + c.overlaps.length, 0);
+});
+
+test('окремі послідовні перемички та мідна збірна шина зменшують навантаження і розбаланс', () => {
+  const c = cellById('samsung-40t');
+  const ni = { material: 'nickel', width: 10, thickness: 0.2, layers: 1 };
+  const cu = { material: 'copper', width: 10, thickness: 0.3, layers: 1 };
+  const near = generateLayout({ S: 20, P: 8, rows: 8, cell: c, gap: 0.5, leadAttach: 'near' });
+  const col = generateLayout({ S: 20, P: 8, rows: 8, cell: c, gap: 0.5, leadAttach: 'collector' });
+  assert.ok(col.buses[0].collector.length === 7 && col.buses[20].collector.length === 7);
+  assert.ok(!near.buses[0].collector);
+  const aNear = analyzeCurrents(near, c, { load: 100, strip: ni, seriesStrip: cu });
+  const aCol = analyzeCurrents(col, c, { load: 100, strip: ni, seriesStrip: cu });
+  assert.ok(aCol.worstGroup.imbalance < aNear.worstGroup.imbalance / 3, `${aCol.worstGroup.imbalance} vs ${aNear.worstGroup.imbalance}`);
+  const aNi = analyzeCurrents(col, c, { load: 100, strip: ni });
+  assert.ok(aCol.maxLinkRatio < aNi.maxLinkRatio);
+  assert.ok(aCol.seriesAmpacity > aCol.ampacity);
+  // нарізка окремо для послідовних і паралельних
+  const all = stripRuns(col), par = stripRuns(col, 'parallel'), ser = stripRuns(col, 'series');
+  assert.equal(par.reduce((s, r) => s + r.links, 0) + ser.reduce((s, r) => s + r.links, 0), all.reduce((s, r) => s + r.links, 0));
+  assert.ok(ser.every((r) => r.series) && par.every((r) => !r.series));
+});
+
+test('вписування у трикутник: усі комірки всередині з відступом, стільники щільніші', () => {
+  const c = cellById('samsung-35e');
+  const tri = shapeOutline({ type: 'triangle', a: 450, b: 300, x: 380 });
+  assert.equal(polygonArea(tri), 450 * 300 / 2);
+  const vs = fitPolygon(tri, c, { gap: 0.5, margin: 2 });
+  assert.equal(vs[0].arrangement, 'honeycomb');
+  for (const v of vs) for (const s of v.slots) assert.ok(circleInPolygon([s.x, s.y], c.d / 2 + 2 - 1e-6, tri));
+  // щільність не перевищує теоретичну для кіл (π/(2√3) ≈ 0,907)
+  assert.ok(vs[0].count * Math.PI * (c.d / 2) ** 2 / polygonArea(tri) < 0.907);
+  assert.ok(vs[0].count > 150);
+  const { configs } = bestConfigsShape({ outline: tri, depth: 80 }, c, {}, [13, 14]);
+  assert.equal(configs.find((x) => x.S === 14).P, 13);
+  assert.equal(bestConfigsShape({ outline: tri, depth: 60 }, c, {}, [14, 14]).configs.length, 0); // 65 мм не вміщується в 60
+  assert.deepEqual(parsePolygon('0,0\n100, 0\n100 50\nx\n0 50'), [[0, 0], [100, 0], [100, 50], [0, 50]]);
+  assert.ok(shapeOutline({ type: 'trapezoid', a: 400, c: 250, b: 200, x: 100 }).length === 4);
+});
+
+test('розкладка у формі: групи суцільні, комірки у контурі, дроти без перетинів', () => {
+  const c = cellById('samsung-35e');
+  const tri = shapeOutline({ type: 'triangle', a: 450, b: 300, x: 380 });
+  const v = fitPolygon(tri, c, { gap: 0.5, margin: 2 })[0];
+  for (const [S, P] of [[14, 6], [13, 7], [14, 13], [10, 18], [20, 9]]) {
+    const L = generateLayout({ S, P, cell: c, gap: 0.5, slots: v.slots, outline: tri });
+    assert.ok(L.custom && L.outline.length === 3);
+    assert.equal(L.cells.length, S * P);
+    for (const cc of L.cells) assert.ok(circleInPolygon([cc.x, cc.y], c.d / 2, L.outline), `${S}S${P}P комірка поза формою`);
+    for (const b of L.buses) assert.ok(b.connected);
+    assert.ok(L.buses.slice(1, S).every((b) => b.seriesLinks >= 1));
+    const cf = routeConflicts(harnessRoutes(L, { gap: 15, thick: 4 }).routes);
+    if (L.harness.quality !== 'crossing') assert.equal(cf.crossings.length, 0, `${S}S${P}P`);
+    assert.ok(analyzeCurrents(L, c, { load: 30, strip }).ok);
+  }
+  // замало місць — звичайна розкладка з попередженням
+  const tiny = generateLayout({ S: 20, P: 20, cell: c, gap: 0.5, slots: v.slots, outline: tri });
+  assert.ok(!tiny.custom && tiny.warnings.length === 1);
+});
+
+test('дроти-перемички: розрізнені частини форми з\'єднуються автоматично', () => {
+  const c = cellById('18650-generic');
+  // два острівці по 6 місць, далеко один від одного
+  const p = c.d + 0.5;
+  const slots = [];
+  for (let i = 0; i < 6; i++) slots.push({ x: 20 + i * p, y: 20, row: 0, col: i });
+  for (let i = 0; i < 6; i++) slots.push({ x: 20 + i * p, y: 120, row: 5, col: i });
+  const L = generateLayout({ S: 4, P: 3, cell: c, gap: 0.5, slots });
+  assert.ok(L.jumperCount >= 1);
+  assert.ok(L.jumperNotes.length >= 1);
+  for (const b of L.buses) assert.ok(b.connected);
+  const a = analyzeCurrents(L, c, { load: 10, strip, jumperArea: 2.08 });
+  assert.ok(a.ok);
+  for (let g = 0; g < 4; g++) assert.ok(Math.abs(L.cells.filter((x) => x.group === g).reduce((s, x) => s + a.cellI[x.id], 0) - 10) < 1e-6);
+  // перемички — не стрічка: не в нарізці і не в перевірці зазорів
+  assert.equal(stripRuns(L).reduce((s, r) => s + r.links, 0), L.linkCount);
+  const svg = renderPackSVG(L, { mode: 'assembly' });
+  assert.ok(svg.includes('Дріт-перемичка') && !/NaN|undefined/.test(svg));
+});
+
+test('яруси: групи діляться, міжярусна перемичка, корпус і 3D стеком', () => {
+  const c = cellById('molicel-p42a');
+  const L = generateLayout({ S: 12, P: 4, rows: 2, cell: c, gap: 0.5, layers: 2 });
+  assert.equal(L.layers, 2);
+  assert.equal(L.groupsPerLayer, 6);
+  assert.ok(L.cells.filter((x) => x.layer === 0).every((x) => x.group < 6));
+  assert.ok(L.cells.filter((x) => x.layer === 1).every((x) => x.group >= 6));
+  const inter = L.buses[6].links.filter((l) => l.crossLayer);
+  assert.ok(inter.length >= 1 && inter.every((l) => l.jumper && l.len >= c.h));
+  // перша група ярусу 2 — над останньою групою ярусу 1 (коротка перемичка)
+  assert.ok(Math.min(...inter.map((l) => l.len)) < c.h + 4 + 2 * (c.d + 0.5));
+  const box = requiredBox(L, c, { margin: 2, depthReserve: 4 });
+  assert.ok(Math.abs(box.depth - (2 * c.h + 4 + 4 + 4)) < 1e-6);
+  assert.ok(Math.abs(box.b - (L.layerHeight + 4)) < 1e-6);
+  const a = analyzeCurrents(L, c, { load: 60, strip, seriesStrip: { material: 'copper', width: 10, thickness: 0.3, layers: 1 } });
+  assert.ok(a.ok);
+  for (let g = 0; g < 12; g++) assert.ok(Math.abs(L.cells.filter((x) => x.group === g).reduce((s, x) => s + a.cellI[x.id], 0) - 60) < 1e-6);
+  const sc = buildScene3D(L, c, { strip, enclosure: true });
+  const ys = [...new Set(sc.items.filter((i) => i.kind === 'cell').map((i) => Math.round(i.y0)))];
+  assert.equal(ys.length, 2);
+  assert.ok(Math.max(...ys) >= c.h);
+  assert.ok(sc.items.some((i) => i.kind === 'wire' && i.jumper));
+  const svg = renderPackSVG(L, { mode: 'assembly', mirrorBottom: true });
+  assert.ok(svg.includes('Ярус 2') && !/NaN|undefined/.test(svg));
+});
+
+test('BMS: нейтральний текст про зайві балансувальні дроти', () => {
+  const L = generateLayout({ S: 13, P: 4, rows: 4, cell: c21700, gap: 0.5 });
+  const plan = bmsPlan(c21700, L, { type: 'smart', port: 'common', channels: 16 }, 20);
+  const t = plan.checks.map((x) => x.text).join(' ');
+  assert.ok(t.includes('залежить від моделі') && t.includes('не підключають'));
+  assert.ok(plan.steps.join(' ').includes('перший пін'));
+  const svg = renderBmsSVG(plan, c21700, 20);
+  assert.ok(svg.includes('за схемою виробника'));
 });

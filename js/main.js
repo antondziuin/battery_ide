@@ -1,7 +1,8 @@
 import { BUILTIN_CELLS, validateCell } from './cells.js';
-import { generateLayout, packStats, autoRows, BMS_SIDE_NAMES } from './layout.js';
+import { generateLayout, packStats, autoRows, BMS_SIDE_NAMES, cellPlace } from './layout.js';
 import { harnessRoutes, routeConflicts, stripRuns, cutList, stripClearance } from './routing.js';
-import { bestConfigs, checkConfig, requiredBox } from './fit.js';
+import { bestConfigs, checkConfig, requiredBox, shapeOutline, parsePolygon, fitPolygon, bestConfigsShape } from './fit.js';
+import { PRESETS, presetById } from './presets.js';
 import { renderPackSVG, renderFitSVG, svgToPng, VIEW_MODES } from './render.js';
 import { buildScene3D } from './scene3d.js';
 import { STRIP_MATERIALS, stripCalc, wireCalc, runtimeCalc, sizePack, parseCellList, balanceCells } from './tools.js';
@@ -23,13 +24,15 @@ const state = {
   S: 10, P: 4, rows: '', gap: 0.5, arrangement: 'grid', snake: 'cols', rotate: false,
   labels: 'group', load: 20, mirror: true, balance: true,
   stripMat: 'nickel', stripW: 8, stripT: 0.15, stripL: 1,
+  ser: { same: true, material: 'copper', width: 8, thickness: 0.2, layers: 1 },
+  layers: 1, shape: null, preset: '',
   bmsSide: 'auto', leadAttach: 'near',
   viewMode: 'scheme', step: 'all',
   v3d: { explode: 0, strips: true, wires: true, labels: true, enclosure: false, color: 'type' },
   zoom: 1,
   bms: { type: 'hardware', port: 'common', channels: 0, current: 0, chargeA: 0, balanceA: 0.05, ntc: 1, sw: true, precharge: false, leadLen: 0.3 },
   matching: null, // { S, P, groups: [[cap...]] }
-  fit: { L: 150, W: 90, H: 75, margin: 2, gap: 0.5, depth: 4, layerGap: 2, layers: false, mode: 'range', smin: 1, smax: 16, volt: '' },
+  fit: { L: 150, W: 90, H: 75, margin: 2, gap: 0.5, depth: 4, layerGap: 2, layers: false, mode: 'range', smin: 1, smax: 16, volt: '', shape: 'box', triA: 450, triB: 300, triX: 380, trapA: 400, trapC: 250, trapB: 200, trapX: 100, poly: '0, 0\n300, 0\n300, 120\n120, 220\n0, 220', thick: 80 },
 };
 
 function load() {
@@ -40,7 +43,7 @@ function load() {
 }
 function mergeState(obj) {
   if (!obj || typeof obj !== 'object') return;
-  for (const k of Object.keys(state)) if (k in obj) state[k] = k === 'fit' || k === 'bms' || k === 'v3d' ? { ...state[k], ...obj[k] } : obj[k];
+  for (const k of Object.keys(state)) if (k in obj) state[k] = ['fit', 'bms', 'v3d', 'ser'].includes(k) ? { ...state[k], ...obj[k] } : obj[k];
 }
 let saveTimer;
 function save() {
@@ -108,7 +111,6 @@ function cellSummary(c) {
 }
 
 // ------------------------------------------------------------------ конструктор
-const PRESETS = [[3, 1], [4, 1], [6, 2], [7, 3], [10, 4], [13, 4], [14, 5], [16, 1], [20, 6]];
 
 function bindDesigner() {
   const bind = (sel, key, parse = (el) => el.value, ev = 'input') => {
@@ -148,11 +150,18 @@ function bindDesigner() {
   v3dBind('#v3dColor', 'color', 'value'); v3dBind('#v3dExplode', 'explode', 'valueAsNumber');
 
   $('#cellSelect').addEventListener('change', (e) => { state.cellId = e.target.value; onCellChange(); });
-  $('#presets').innerHTML = PRESETS.map(([s, p]) => `<button data-s="${s}" data-p="${p}" title="${s} послідовно × ${p} паралельно">${s}S${p}P</button>`).join('');
-  $('#presets').addEventListener('click', (e) => {
-    const b = e.target.closest('button'); if (!b) return;
-    setConfig(+b.dataset.s, +b.dataset.p, '');
-  });
+  $('#presetSel').innerHTML = '<option value="">— обрати пресет —</option>' + PRESETS.map((p) => `<option value="${p.id}">${esc(p.label)}</option>`).join('');
+  $('#presetSel').addEventListener('change', (e) => applyPreset(e.target.value));
+  $('#shapeReset').addEventListener('click', () => { state.shape = null; syncInputs(); renderDesigner(); save(); toast('Форму скинуто — звичайна розкладка'); });
+  bind('#inLayers', 'layers', (el) => Math.max(1, Math.min(4, Math.floor(num(el)) || 1)));
+  // послідовні перемички
+  $('#inSerMat').innerHTML = Object.entries(STRIP_MATERIALS).map(([k, m]) => `<option value="${k}">${esc(m.name)}</option>`).join('');
+  const serRead = () => {
+    state.ser = { same: $('#inSerSame').checked, material: $('#inSerMat').value, width: num($('#inSerW')) || 8, thickness: num($('#inSerT')) || 0.15, layers: Math.max(1, Math.floor(num($('#inSerL'))) || 1) };
+    $('#serStripBox').hidden = state.ser.same;
+    renderDesigner(); save();
+  };
+  for (const id of ['#inSerSame', '#inSerMat', '#inSerW', '#inSerT', '#inSerL']) $(id).addEventListener(id === '#inSerSame' || id === '#inSerMat' ? 'change' : 'input', serRead);
   $$('.zoom button').forEach((b) => b.addEventListener('click', () => {
     const d = +b.dataset.zoom;
     state.zoom = d === 0 ? 1 : Math.max(0.3, Math.min(6, state.zoom * (d > 0 ? 1.25 : 0.8)));
@@ -187,13 +196,49 @@ function syncInputs() {
     const el = $(sel);
     if (el.type === 'checkbox') el.checked = !!state[key]; else el.value = state[key];
   }
+  $('#inLayers').value = state.layers || 1;
+  $('#inSerSame').checked = state.ser.same; $('#inSerMat').value = state.ser.material;
+  $('#inSerW').value = state.ser.width; $('#inSerT').value = state.ser.thickness; $('#inSerL').value = state.ser.layers;
+  $('#serStripBox').hidden = state.ser.same;
+  $('#presetSel').value = state.preset || '';
   syncFitInputs();
   syncBmsInputs();
 }
 
 function setConfig(S, P, rows, extra = {}) {
-  Object.assign(state, { S, P, rows }, extra);
+  Object.assign(state, { S, P, rows, preset: '' }, extra);
   syncInputs(); renderDesigner(); save();
+}
+
+/** Застосувати типову збірку: комірка, S×P, розкладка, перемички, BMS, за потреби — форма корпусу. */
+function applyPreset(id) {
+  const p = presetById(id);
+  if (!p) { state.preset = ''; save(); return; }
+  Object.assign(state, {
+    preset: id, cellId: p.cell, S: p.S, P: p.P, rows: p.rows ?? '', load: p.load,
+    arrangement: p.arrangement || 'grid', snake: p.snake || 'cols', layers: p.layers || 1,
+    leadAttach: p.lead || 'near', shape: null, rotate: false,
+  });
+  if (p.strip) Object.assign(state, { stripMat: p.strip.material, stripW: p.strip.width, stripT: p.strip.thickness, stripL: p.strip.layers });
+  else Object.assign(state, { stripMat: 'nickel', stripW: 8, stripT: 0.15, stripL: 1 });
+  state.ser = p.ser ? { ...p.ser } : { ...state.ser, same: true };
+  if (p.bms) state.bms = { ...state.bms, ...p.bms };
+  if (p.shape) {
+    // вписати у форму одразу: контур + позиції комірок
+    Object.assign(state.fit, { shape: p.shape.type, triA: p.shape.a, triB: p.shape.b, triX: p.shape.x, thick: p.shape.thick });
+    const outline = shapeOutline(p.shape);
+    const v = fitPolygon(outline, getCell(), { gap: state.gap, margin: state.fit.margin })[0];
+    if (v && v.count >= p.S * p.P) state.shape = { type: p.shape.type, outline, slots: v.slots, arrangement: v.arrangement, thick: p.shape.thick, label: shapeLabel(p.shape) };
+  }
+  fillCellSelect(); syncInputs(); renderAll(); save();
+  toast(`Пресет: ${p.label}`);
+}
+
+function shapeLabel(sh) {
+  if (sh.type === 'triangle') return `трикутник ${sh.a}×${sh.b} мм`;
+  if (sh.type === 'trapezoid') return `трапеція ${sh.a}/${sh.c}×${sh.b} мм`;
+  if (sh.type === 'polygon') return 'довільний контур';
+  return 'форма';
 }
 
 function onCellChange() {
@@ -223,13 +268,19 @@ function cellLabelsFromMatching(layout) {
 }
 
 const stripOpts = () => ({ material: state.stripMat, width: state.stripW, thickness: state.stripT, layers: state.stripL });
+const serOpts = () => (state.ser.same ? stripOpts() : { material: state.ser.material, width: state.ser.width, thickness: state.ser.thickness, layers: state.ser.layers });
+/** Перетин мідних дротів-перемичок — за струмом навантаження. */
+const jumperArea = (cell) => wireCalc({ current: Math.max(state.load, 1), length: 0.2, voltage: state.S * cell.vNom, maxDropPct: 1 }).recommended?.mm2 ?? 3.31;
+const analysisOpts = (cell) => ({ load: state.load, strip: stripOpts(), seriesStrip: state.ser.same ? null : serOpts(), jumperArea: jumperArea(cell), collectorArea: 5 });
 let currentAnalysis = null;
 
 function buildLayout(cell) {
   const rows = state.rows || autoRows(state.S, state.P, cell.shape, state.snake);
+  const sh = state.shape && cell.shape === 'cyl' ? state.shape : null;
   return generateLayout({
     S: state.S, P: state.P, rows, arrangement: state.arrangement, snake: state.snake, gap: state.gap, cell,
-    rotate: state.rotate, bmsSide: state.bmsSide, leadAttach: state.leadAttach,
+    rotate: state.rotate, bmsSide: state.bmsSide, leadAttach: state.leadAttach, layers: state.layers || 1,
+    slots: sh?.slots, outline: sh?.outline,
   });
 }
 
@@ -238,9 +289,10 @@ function linkPlace(layout, a) {
   const l = a.maxLink;
   if (!l) return '';
   const A = layout.cells[l.a];
-  if (l.bus === 0) return `на мінусовій шині (група 1), біля ряду ${A.row + 1}, стовпця ${A.col + 1}`;
-  if (l.bus === layout.S) return `на плюсовій шині (група ${layout.S}), біля ряду ${A.row + 1}, стовпця ${A.col + 1}`;
-  return `${l.series ? 'послідовна' : 'паралельна'} перемичка ${groupPair(l.bus)}, ряд ${A.row + 1}, стовпець ${A.col + 1}`;
+  const at = cellPlace(layout, A);
+  if (l.bus === 0) return `на мінусовій шині (група 1), біля: ${at}`;
+  if (l.bus === layout.S) return `на плюсовій шині (група ${layout.S}), біля: ${at}`;
+  return l.series ? `послідовна ${groupPair(l.bus)}, біля: ${at}` : `паралельна в групі ${A.group + 1} (шина B${l.bus}), біля: ${at}`;
 }
 
 function renderDesigner() {
@@ -249,12 +301,18 @@ function renderDesigner() {
   $('#rotateWrap').hidden = cell.shape === 'cyl';
   $$('#inArr option[value^="honeycomb"]').forEach((o) => (o.disabled = cell.shape !== 'cyl'));
   $('#inSnake').disabled = state.arrangement === 'honeycomb2' && cell.shape === 'cyl';
-  $('#inRows').placeholder = `авто (${autoRows(state.S, state.P, cell.shape, state.snake)})`;
+  $('#inRows').placeholder = `авто (${autoRows(Math.ceil(state.S / (state.layers || 1)), state.P, cell.shape, state.snake)})`;
+  const shapeOn = !!(state.shape && cell.shape === 'cyl');
+  $('#shapeBadge').hidden = !shapeOn;
+  if (shapeOn) $('#shapeBadgeText').textContent = `Форма: ${state.shape.label || 'довільна'} (${state.shape.slots.length} місць)`;
+  for (const id of ['#inRows', '#inArr', '#inSnake']) $(id).disabled = shapeOn || (id === '#inSnake' && state.arrangement === 'honeycomb2' && cell.shape === 'cyl');
+  const pr = presetById(state.preset);
+  $('#presetNote').textContent = pr ? pr.note : '';
 
   const layout = buildLayout(cell);
   currentLayout = layout;
   const stats = packStats(cell, state.S, state.P, { loadCurrent: state.load });
-  const analysis = layout.N <= 4000 ? analyzeCurrents(layout, cell, { load: state.load, strip: stripOpts() }) : { ok: false, reason: 'Завеликий пакет для розрахунку' };
+  const analysis = layout.N <= 4000 ? analyzeCurrents(layout, cell, analysisOpts(cell)) : { ok: false, reason: 'Завеликий пакет для розрахунку' };
   currentAnalysis = analysis;
   const cellLabels = state.labels === 'capacity' ? cellLabelsFromMatching(layout) : null;
   const title = `${state.S}S${state.P}P · ${cell.name} · ${fmt(stats.vNom)} В ${fmt(stats.ah)} А·год`;
@@ -281,8 +339,10 @@ function renderDesigner() {
     $('#svgHost').innerHTML = currentSvg;
     applyZoom();
   }
-  const snakeName = { cols: '', rows: ', змійка по рядах', u: ', U-подібна' }[layout.snake] || '';
-  $('#schemeTitle').textContent = `Схема ${state.S}S${state.P}P — ${layout.rows}×${layout.cols}${layout.honey ? (layout.dense ? ', щільні стільники' : ', стільники') : ''}${snakeName}`;
+  const snakeName = { cols: '', rows: ', змійка по рядах', u: ', U-подібна', shape: '' }[layout.snake] || '';
+  $('#schemeTitle').textContent = layout.custom
+    ? `Схема ${state.S}S${state.P}P — ${state.shape.label}${layout.layers > 1 ? `, ${layout.layers} яруси` : ''}`
+    : `Схема ${state.S}S${state.P}P — ${layout.rows}×${layout.cols}${layout.honey ? (layout.dense ? ', щільні стільники' : ', стільники') : ''}${snakeName}${layout.layers > 1 ? `, ${layout.layers} яруси` : ''}`;
 
   // попередження
   const warns = [...layout.warnings];
@@ -290,15 +350,15 @@ function renderDesigner() {
   const perLink = state.S > 1 && layout.minSeries ? state.load / layout.minSeries : null;
   if (analysis.ok) {
     if (cell.shape === 'cyl' && analysis.maxLinkRatio > 1.05)
-      warns.push(`Найнавантаженіша перемичка — ${linkPlace(layout, analysis)}: ${fmt(analysis.maxLink.I)} А при допустимих ≈ ${fmt(strip.ampacity)} А. `
+      warns.push(`Найнавантаженіша ${analysis.maxLink.jumper ? 'дріт-перемичка' : 'перемичка'} — ${linkPlace(layout, analysis)}: ${fmt(analysis.maxLink.I)} А при допустимих ≈ ${fmt(analysis.maxLink.ampacity)} А. `
         + (analysis.maxLink.series && layout.buses[analysis.maxLink.bus].seriesLinks === 1
           ? `Групи ${analysis.maxLink.bus} та ${analysis.maxLink.bus + 1} торкаються лише однією коміркою — весь струм іде через одну перемичку. Покладіть уздовж стику мідну шину або змініть кількість рядів.`
-          : 'Додайте шар стрічки, ширшу стрічку або мідь саме на цій ділянці.'));
+          : analysis.maxLink.series && state.ser.same ? 'Задайте окремо товщі або мідні послідовні перемички (розділ «Перемички»).' : 'Додайте шар стрічки, ширшу стрічку або мідь саме на цій ділянці.'));
     if (analysis.maxCellRatio > 1)
       warns.push(`Комірка #${analysis.maxCellId + 1} віддає ${fmt(analysis.maxCell, 2)} А — більше за допустимі ${cell.iMax} А через нерівномірний розподіл струму.`);
     const wg = analysis.worstGroup;
     if (wg && layout.P > 1 && wg.imbalance > 0.15)
-      warns.push(`Нерівномірний струм у групі ${wg.group + 1}: від ${fmt(wg.min, 2)} до ${fmt(wg.max, 2)} А (${fmt(wg.imbalance * 100, 0)}%). Комірки біля силових виводів старітимуть швидше — перенесіть виводи в центр групи, додайте шар стрічки або мідну шину.`);
+      warns.push(`Нерівномірний струм у групі ${wg.group + 1}: від ${fmt(wg.min, 2)} до ${fmt(wg.max, 2)} А (${fmt(wg.imbalance * 100, 0)}%). Комірки біля силових виводів старітимуть швидше — ${state.leadAttach === 'collector' ? 'додайте шар стрічки або мідь на послідовних перемичках' : 'оберіть «Мідна збірна шина по групі» для силових виводів або перенесіть їх у центр групи'}.`);
   } else if (cell.shape === 'cyl' && perLink && perLink > strip.ampacity * 1.05) {
     warns.push(`Струм через послідовну перемичку ≈ ${fmt(perLink)} А (найслабше місце — ${groupPair(layout.weakestBus)}, ${layout.minSeries} перемичок), а стрічка витримує ≈ ${fmt(strip.ampacity)} А.`);
   }
@@ -309,7 +369,8 @@ function renderDesigner() {
   $('#bmsSideHint').textContent = sideHint(layout, comm);
   if (state.labels === 'capacity' && !cellLabels)
     warns.push('Немає результату балансування для цієї конфігурації — розподіліть комірки на вкладці «Балансування комірок».');
-  $('#warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
+  $('#warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join('')
+    + layout.jumperNotes.map((n) => `<div class="warn note">🔗 ${esc(n)}</div>`).join('');
 
   const plan = currentPlan(cell, layout);
   renderStats(cell, stats, layout, strip, perLink, analysis, plan, comm);
@@ -344,7 +405,8 @@ function renderStats(cell, st, layout, strip, perLink, a, plan, comm) {
       ? ['Тепло при навантаженні', `${fmt(a.cellLoss + a.stripLoss, 1)} Вт`, `комірки ${fmt(a.cellLoss, 1)} Вт, перемички ${fmt(a.stripLoss, 1)} Вт`]
       : ['Тепло при навантаженні', st.heat ? `${fmt(st.heat, 1)} Вт` : '—', 'втрати на опорі комірок'],
     ['Маса', `${fmt(st.massEst / 1000, 2)} кг`, `комірки ${fmt(st.cellsMass / 1000, 2)} кг`],
-    ['Розмір блоку', `${fmt(layout.width, 0)}×${fmt(layout.height, 0)}`, `× ${fmt(cell.h, 0)} мм (корпус від ${fmt(box.a, 0)}×${fmt(box.b, 0)}×${fmt(box.depth, 0)})`],
+    ['Розмір блоку', `${fmt(layout.width, 0)}×${fmt(layout.layers > 1 ? layout.layerHeight : layout.height, 0)}`, `× ${fmt(box.depth - 2 * state.fit.margin - state.fit.depth, 0)} мм${layout.layers > 1 ? ` (${layout.layers} яруси)` : ''}; корпус від ${fmt(box.a, 0)}×${fmt(box.b, 0)}×${fmt(box.depth, 0)}`],
+    cell.shape === 'prism' ? ['Стискання пакета', cell.compression ? `${cell.compression[0]}–${cell.compression[1]} кН` : 'за даташитом', cell.torque ? `клеми ≈ ${cell.torque} Н·м; гнучкі шини` : 'момент клем — за даташитом'] : null,
     ['BMS', `${plan.channels}S · ${plan.bmsCurrent} А`, `запобіжник ${fmt(plan.fuse, 1)} А, заряд ${fmt(plan.pack.charge, 1)} В`, plan.checks.some((c) => c.level === 'bad') ? 'bad' : ''],
     ['Комутація', comm.conflicts.crossings.length ? `${comm.conflicts.crossings.length} перетинів` : '0 перетинів',
       `дроти BMS ${BMS_SIDE_NAMES[layout.bmsSide]}${comm.conflicts.overlaps.length ? `, ${comm.conflicts.overlaps.length} у джгуті` : ''}; зазор між шинами ${comm.clearance.minGap == null ? '—' : `≥ ${fmt(comm.clearance.minGap, 1)} мм`}`,
@@ -359,12 +421,25 @@ function renderStats(cell, st, layout, strip, perLink, a, plan, comm) {
 function renderBom(cell, st, layout, plan, comm) {
   const cyl = cell.shape === 'cyl';
   const L = cyl ? state.stripL : 1;
-  const cutText = comm.cuts.items.slice(0, 8).map((i) => `${i.count * L} шт × ${i.len}`).join(', ') + (comm.cuts.items.length > 8 ? ', …' : '');
+  const cutStr = (cl, layers) => cl.items.slice(0, 8).map((i) => `${i.count * layers} шт × ${i.len}`).join(', ') + (cl.items.length > 8 ? ', …' : '');
+  const cutText = cutStr(comm.cuts, L);
   const pw = plan.power.recommended;
+  const ser = serOpts();
+  const stripRow = (name, spec, cl) => [`Стрічка ${STRIP_MATERIALS[spec.material].name} ${spec.width}×${spec.thickness} мм${spec.layers > 1 ? `, ${spec.layers} шари` : ''} — ${name}`, cl.pieces * spec.layers, `відрізків: ${cutStr(cl, spec.layers)} мм; разом ≈ ${fmt(cl.total * spec.layers / 1000, 2)} м`];
+  const jArea = jumperArea(cell);
+  const jAwg = wireCalc({ current: 1, length: 0.1, voltage: 10, maxDropPct: 100 }).rows.find((r) => r.mm2 >= jArea - 1e-9);
+  const collectorLen = [0, layout.S].reduce((s, j) => s + (layout.buses[j].collector || []).reduce((t, e) => t + e.len, 0), 0);
   const rows = [
     [`Комірка ${cell.name}`, st.N, 'шт'],
     cyl ? ['Тримачі (холдери) комірок', `${st.N * 2}`, 'шт (верх+низ)'] : ['Шини/busbar (мідь)', comm.cuts.pieces, `шт (довжини з напуском на клеми): ${cutText} мм`],
-    cyl ? [`Стрічка ${STRIP_MATERIALS[state.stripMat].name} ${state.stripW}×${state.stripT} мм${L > 1 ? `, ${L} шари` : ''}`, comm.cuts.pieces * L, `відрізків (з напуском на зварювання): ${cutText} мм; разом ≈ ${fmt(comm.cuts.total * L / 1000, 2)} м`] : null,
+    cyl && !comm.cutsPar ? [`Стрічка ${STRIP_MATERIALS[state.stripMat].name} ${state.stripW}×${state.stripT} мм${L > 1 ? `, ${L} шари` : ''}`, comm.cuts.pieces * L, `відрізків (з напуском на зварювання): ${cutText} мм; разом ≈ ${fmt(comm.cuts.total * L / 1000, 2)} м`] : null,
+    comm.cutsPar ? stripRow('паралельні', stripOpts(), comm.cutsPar) : null,
+    comm.cutsSer ? stripRow('послідовні', ser, comm.cutsSer) : null,
+    layout.jumperCount ? [`Дроти-перемички ${jAwg ? `${jAwg.awg} AWG (${jAwg.mm2} мм²)` : `${fmt(jArea, 1)} мм²`}, мідь у силіконі`, layout.jumperCount, `шт, разом ≈ ${fmt(layout.jumperLength * 1.2 / 1000, 2)} м (з запасом)`] : null,
+    collectorLen ? ['Мідна збірна шина 10×0,5 мм на силових виводах', 2, `шт, ≈ ${fmt(collectorLen / 2 + 20, 0)} мм кожна`] : null,
+    layout.layers > 1 ? ['Ізоляційна прокладка між ярусами (fish paper / G10)', layout.layers - 1, 'шт'] : null,
+    !cyl ? ['Торцеві пластини + шпильки для стискання пакета', 1, `компл.${cell.compression ? `, ≈ ${cell.compression[0]}–${cell.compression[1]} кН` : ''}`] : null,
+    !cyl ? ['Гнучкі шини між комірками (компенсація розширення)', comm.cuts.pieces, 'шт (замість жорстких)'] : null,
     cyl ? ['Ізоляційні кільця (fish paper) на «+»', st.N, 'шт'] : null,
     [`BMS ${plan.channels}S ${cell.chem}, ${BMS_PORTS[plan.port].split(' (')[0].toLowerCase()}, ≥ ${plan.bmsCurrent} А`, 1, 'шт'],
     [`Балансувальні дроти ${plan.balanceAwg}–24 AWG (B0…B${state.S})`, st.balanceWires, `шт, ≈ ${fmt(plan.balanceLength / 1000, 2)} м разом`],
@@ -382,6 +457,7 @@ function renderBom(cell, st, layout, plan, comm) {
 function renderSteps(cell, layout, plan) {
   const S = layout.S;
   const cyl = cell.shape === 'cyl';
+  const leadText = { center: 'центр крайніх груп', collector: 'мідна збірна шина вздовж усієї крайньої групи', near: 'біля BMS' }[layout.leadAttach] || 'біля BMS';
   const steps = [
     `Перевірте всі ${layout.N} комірок: напруга в межах ±0,05 В, однакова партія. За можливості розподіліть за ємністю (вкладка «Балансування»).`,
     cyl ? `Встановіть комірки в тримачі за схемою «Вигляд зверху»: групи 1, 3, 5… — «+» догори, групи 2, 4, 6… — «−» догори.`
@@ -389,10 +465,13 @@ function renderSteps(cell, layout, plan) {
     `Приваріть перемички на ${cyl ? 'верхній стороні' : 'клемах'}: шини B1, B3, B5… (${Math.ceil((S) / 2)} шт).`,
     cyl ? `Переверніть блок і приваріть нижні шини B0, B2, B4… згідно з «Вигляд знизу».` : `Встановіть шини B0, B2, B4…`,
     `Перевірте мультиметром напругу кожної групи та наростання напруги між B0 та кожним Bn (≈ n × ${cell.vNom} В).`,
-    `Приваріть силові виводи в позначених точках P− та P+ (${layout.leadAttach === 'center' ? 'центр крайніх груп' : 'біля BMS'}), дріт ${plan.power.recommended ? plan.power.recommended.awg + ' AWG' : 'див. вкладку BMS'}.`,
+    layout.jumperCount ? `Встановіть дроти-перемички (${layout.jumperCount} шт, позначені пунктиром): там, де частини шини не торкаються${layout.layers > 1 ? ', і між ярусами' : ''}. Кінці — під перемичку або паяння на шину, без зварювання дроту до комірки.` : null,
+    layout.layers > 1 ? `Збирайте яруси окремо (по ${layout.groupsPerLayer} груп), між ярусами — ізоляційна прокладка. Ярус 2 стоїть над ярусом 1 так, що його перша група над останньою групою ярусу 1.` : null,
+    `Приваріть силові виводи в позначених точках P− та P+ (${leadText}), дріт ${plan.power.recommended ? plan.power.recommended.awg + ' AWG' : 'див. вкладку BMS'}.`,
+    !cyl ? `Стисніть пакет торцевими пластинами${cell.compression ? ` (≈ ${cell.compression[0]}–${cell.compression[1]} кН)` : ''} до встановлення шин; шини — гнучкі, клеми затягуйте динамометричним ключем${cell.torque ? ` ≈ ${cell.torque} Н·м` : ' за даташитом'}. Перевірте даташит саме вашої партії.` : null,
     `Підключіть BMS за вкладкою «Підключення BMS»: B− → балансувальні B0…B${S} → роз'єм → P−${plan.port === 'separate' ? '/C−' : ''}. Запобіжник ${fmt(plan.fuse, 1)} А на P+.`,
     `Перший заряд — малим струмом під наглядом, перевірте балансування груп.`,
-  ];
+  ].filter(Boolean);
   $('#assemblySteps').innerHTML = steps.map((s) => `<li>${esc(s)}</li>`).join('');
 }
 
@@ -400,11 +479,16 @@ function renderSteps(cell, layout, plan) {
 /** Перевірка розводки: перетини дротів BMS, зазори між шинами, нарізка стрічки. */
 function commutation(cell, layout) {
   const cyl = cell.shape === 'cyl';
-  const width = cyl ? state.stripW : Math.min(layout.footprint.w, layout.footprint.h) * 0.3;
+  const busbar = Math.min(layout.footprint.w, layout.footprint.h) * 0.3;
+  const width = cyl ? { parallel: state.stripW, series: serOpts().width } : busbar;
   const harness = harnessRoutes(layout, { gap: 15, thick: 4 });
   const conflicts = routeConflicts(harness.routes);
   const clearance = stripClearance(layout, width, 1);
-  const cuts = cutList(stripRuns(layout), cyl ? Math.min(cell.d * 0.25, 5) : 8);
+  const overlap = cyl ? Math.min(cell.d * 0.25, 5) : 8;
+  const separate = cyl && !state.ser.same;
+  const cuts = cutList(stripRuns(layout), overlap);
+  const cutsPar = separate ? cutList(stripRuns(layout, 'parallel'), overlap) : null;
+  const cutsSer = separate ? cutList(stripRuns(layout, 'series'), overlap) : null;
   const warnings = [];
   const h = layout.harness;
   const best = h.bestSide !== layout.bmsSide && h.alternatives[h.bestSide].quality === 'clean' ? ` Чисте розведення — BMS ${BMS_SIDE_NAMES[h.bestSide]} (або «Автоматично»).` : '';
@@ -420,7 +504,7 @@ function commutation(cell, layout) {
   }
   if (terms.length)
     warnings.push(`${cyl ? 'Перемичка' : 'Шина'} B${terms[0].buses[0]} проходить над клемою комірки #${terms[0].cell + 1} іншої шини (B${terms[0].buses[1]}) — ризик замикання; потрібна ізоляція або інша траса.`);
-  return { harness, conflicts, clearance, cuts, warnings };
+  return { harness, conflicts, clearance, cuts, cutsPar, cutsSer, warnings };
 }
 
 function sideHint(layout, comm) {
@@ -526,7 +610,7 @@ function renderBms() {
   $('#bmsWires').innerHTML = '<thead><tr><th>Дріт</th><th>Що з\'єднує</th><th>Куди приварити</th><th class="num">Від B0, В</th><th class="num">Довжина</th></tr></thead><tbody>'
     + plan.wires.map((w) => `<tr><td><span class="swatch" style="background:${w.color}"></span><b>${w.name}</b></td><td>${esc(w.role)}</td><td>${esc(w.where)}</td>`
       + `<td class="num">${fmt(w.vMin, 2)} / <b>${fmt(w.vNom, 2)}</b> / ${fmt(w.vMax, 2)}</td><td class="num">≈ ${w.length} мм</td></tr>`).join('')
-    + (plan.unused ? `<tr class="dim"><td colspan="5">Невикористані канали B${layout.S + 1}…B${plan.channels}: ${plan.type === 'smart' ? `зазвичай з'єднуються з B${layout.S} — перевірте інструкцію BMS` : 'апаратна BMS має відповідати S'}</td></tr>` : '')
+    + (plan.unused ? `<tr class="dim"><td colspan="5">Невикористані канали B${layout.S + 1}…B${plan.channels}: ${plan.type === 'smart' ? `задайте ${layout.S} комірок у налаштуваннях; зайві дроти — не підключати або з'єднати з B${layout.S}, залежно від моделі (див. схему виробника)` : 'апаратна BMS має відповідати S'}</td></tr>` : '')
     + '</tbody>';
 
   const p = plan.profile, k = layout.S;
@@ -565,7 +649,28 @@ function syncFitInputs() {
   $('#fitMargin').value = f.margin; $('#fitGap').value = f.gap; $('#fitDepth').value = f.depth;
   $('#fitLayerGap').value = f.layerGap; $('#fitLayers').checked = f.layers;
   $('#fitSmin').value = f.smin; $('#fitSmax').value = f.smax; $('#fitVolt').value = f.volt;
-  setFitMode(f.mode);
+  $('#fitShape').value = f.shape;
+  $('#triA').value = f.triA; $('#triB').value = f.triB; $('#triX').value = f.triX;
+  $('#trapA').value = f.trapA; $('#trapC').value = f.trapC; $('#trapB').value = f.trapB; $('#trapX').value = f.trapX;
+  $('#fitPoly').value = f.poly; $('#fitThick').value = f.thick;
+  showFitShape(f.shape);
+  setFitMode(f.mode === 'box' && f.shape !== 'box' ? 'range' : f.mode);
+}
+function showFitShape(shape) {
+  $('#shapeBox').hidden = shape !== 'box';
+  $('#shapeTri').hidden = shape !== 'triangle';
+  $('#shapeTrap').hidden = shape !== 'trapezoid';
+  $('#shapePoly').hidden = shape !== 'polygon';
+  $('#shapeThick').hidden = shape === 'box';
+  $('#fitModeSeg [data-mode="box"]').hidden = shape !== 'box';
+}
+/** Контур поточної форми з полів вкладки (мм). */
+function fitShapeSpec() {
+  const f = state.fit;
+  if (f.shape === 'triangle') return { type: 'triangle', a: f.triA, b: f.triB, x: f.triX };
+  if (f.shape === 'trapezoid') return { type: 'trapezoid', a: f.trapA, c: f.trapC, b: f.trapB, x: f.trapX };
+  if (f.shape === 'polygon') return { type: 'polygon', points: parsePolygon(f.poly) };
+  return null;
 }
 function readFit() {
   const f = state.fit;
@@ -574,6 +679,10 @@ function readFit() {
   f.layerGap = num($('#fitLayerGap')); f.layers = $('#fitLayers').checked;
   f.smin = Math.max(1, Math.floor(num($('#fitSmin')))); f.smax = Math.max(f.smin, Math.floor(num($('#fitSmax'))));
   f.volt = $('#fitVolt').value;
+  f.shape = $('#fitShape').value;
+  f.triA = num($('#triA')); f.triB = num($('#triB')); f.triX = num($('#triX'));
+  f.trapA = num($('#trapA')); f.trapC = num($('#trapC')); f.trapB = num($('#trapB')); f.trapX = num($('#trapX'));
+  f.poly = $('#fitPoly').value; f.thick = num($('#fitThick'));
   save();
 }
 function setFitMode(mode) {
@@ -589,7 +698,8 @@ function bindFit() {
   $$('#fitModeSeg button').forEach((b) => b.addEventListener('click', () => { setFitMode(b.dataset.mode); updateFitHint(); runFit(); }));
   $('#fitRun').addEventListener('click', runFit);
   $$('#tab-fit aside input').forEach((el) => el.addEventListener('keydown', (e) => { if (e.key === 'Enter') runFit(); }));
-  $$('#tab-fit aside input').forEach((el) => el.addEventListener('change', runFit));
+  $$('#tab-fit aside input, #tab-fit aside textarea').forEach((el) => el.addEventListener('change', runFit));
+  $('#fitShape').addEventListener('change', () => { showFitShape($('#fitShape').value); if (state.fit.mode === 'box' && $('#fitShape').value !== 'box') setFitMode('range'); runFit(); });
   $('#fitTable').addEventListener('click', (e) => {
     const tr = e.target.closest('tr[data-i]'); if (!tr) return;
     selectFit(+tr.dataset.i);
@@ -597,9 +707,15 @@ function bindFit() {
   $('#fitApply').addEventListener('click', () => {
     const r = fitRows[fitSel]; if (!r) return;
     const L = r.layout;
-    setConfig(r.layers > 1 ? r.layerS : r.S, r.P, r.rows, { arrangement: L.arrangement, rotate: !!L.rotate, gap: state.fit.gap, snake: 'cols' });
+    if (L.shape) {
+      const spec = fitShapeSpec();
+      const shape = { type: spec.type, outline: L.outline, slots: L.slots, arrangement: L.arrangement, thick: state.fit.thick, label: shapeLabel(spec) };
+      setConfig(r.S, r.P, '', { arrangement: L.arrangement, gap: state.fit.gap, layers: r.layers, shape, rotate: false });
+    } else {
+      setConfig(r.S, r.P, r.rows, { arrangement: L.arrangement, rotate: !!L.rotate, gap: state.fit.gap, snake: 'cols', layers: r.layers, shape: null });
+    }
     showTab('designer');
-    toast(r.layers > 1 ? `Відкрито один шар (${r.layerS}S${r.P}P) з ${r.layers}` : 'Конфігурацію застосовано');
+    toast(r.layers > 1 ? `Застосовано ${r.S}S${r.P}P у ${r.layers} яруси` : 'Конфігурацію застосовано');
   });
 }
 
@@ -611,6 +727,7 @@ function runFit() {
   const opt = { gap: f.gap, margin: f.margin, depthReserve: f.depth, layerGap: f.layerGap, allowLayers: f.layers };
   fitRows = [];
   let summary = '';
+  if (f.shape !== 'box') { runFitShape(cell, opt); return; }
   if (f.mode === 'range') {
     let range = [f.smin, f.smax];
     const v = parseFloat(f.volt);
@@ -635,7 +752,7 @@ function runFit() {
   if (fitRows.length) {
     // за замовчуванням — рядок з найбільшою енергією в режимі підбору
     let best = 0;
-    if (f.mode === 'range') fitRows.forEach((r, i) => { if (r.S * r.P >= fitRows[best].S * fitRows[best].P) best = i; });
+    if (f.mode === 'range') best = preferredFitRow();
     selectFit(best);
   } else {
     fitSel = null; $('#fitApply').disabled = true;
@@ -643,7 +760,59 @@ function runFit() {
   }
 }
 
-const arrName = (l) => ({ honeycomb: 'стільники', honeycomb2: 'щільні стільники' }[l.arrangement] || 'сітка') + (l.rotate ? ' (поверн.)' : '');
+/** Вписування в трикутник / трапецію / довільний контур. */
+function runFitShape(cell, opt) {
+  const f = state.fit;
+  const spec = fitShapeSpec();
+  const outline = shapeOutline(spec);
+  const finish = (summary) => {
+    $('#fitSummary').innerHTML = summary;
+    renderFitTable(cell);
+    if (fitRows.length) {
+      let best = 0;
+      if (f.mode === 'range') best = preferredFitRow();
+      selectFit(best);
+    } else {
+      fitSel = null; $('#fitApply').disabled = true;
+      $('#fitHost').innerHTML = '<p class="hint">Немає варіантів.</p>';
+    }
+  };
+  if (cell.shape !== 'cyl') return finish('<span class="err">Довільна форма підтримується для циліндричних комірок. Для призматичних оберіть прямокутний корпус.</span>');
+  if (!outline || outline.length < 3 || polygonAreaSafe(outline) < 1) return finish('<span class="err">Контур не задано або він вироджений — перевірте розміри.</span>');
+  let range = [f.smin, f.smax];
+  const v = parseFloat(f.volt);
+  if (v > 0) { const s = Math.round(v / cell.vNom); range = [Math.max(1, s - 1), s + 1]; }
+  if (f.mode === 'check') range = [state.S, state.S];
+  const res = bestConfigsShape({ outline, depth: f.thick }, cell, opt, range);
+  if (!res.variants.length) return finish(`<span class="err">Комірка ${esc(cell.name)} (довжина ${fmt(cell.h, 1)} мм) не вміщується в товщину ${fmt(f.thick, 0)} мм з відступами або у форму.</span>`);
+  const best = res.variants[0];
+  const withOutline = (r) => ({ ...r, layout: { ...r.layout, outline } });
+  if (f.mode === 'check') {
+    const ok = [];
+    for (const vv of res.variants)
+      for (let k = 1; k <= Math.min(res.maxLayers, state.S); k++) {
+        const Sl = Math.ceil(state.S / k);
+        if (Sl * state.P <= vv.count) { ok.push({ S: state.S, P: state.P, layers: k, layerS: Sl, rows: null, layout: { ...res.configs[0]?.layout, ...vv, perLayer: vv.count, outline, shape: true, orientation: 'вісь комірок — уздовж товщини' } }); break; }
+      }
+    fitRows = ok;
+    return finish(ok.length ? `<span style="color:var(--ok)">✔ ${state.S}S${state.P}P поміщається у форму — ${ok.length} варіант(и).</span>`
+      : `<span class="err">✘ ${state.S}S${state.P}P (${state.S * state.P} комірок) не поміщається: у форму входить до ${best.count} комірок${res.maxLayers > 1 ? ` на ярус, ярусів до ${res.maxLayers}` : ''}.</span>`);
+  }
+  fitRows = res.configs.map(withOutline);
+  finish(`Максимум у формі: <b>${best.count}</b> комірок ${esc(cell.name)} (${best.arrangement === 'grid' ? 'сітка' : 'стільники'}, поворот решітки ${best.angle}°)${res.maxLayers > 1 ? `, до ${res.maxLayers} ярусів` : ''}. Площа форми ${fmt(polygonAreaSafe(outline) / 100, 0)} см².`);
+}
+const polygonAreaSafe = (poly) => { let s = 0; for (let i = 0; i < poly.length; i++) { const [a, b] = poly[i], [c, d] = poly[(i + 1) % poly.length]; s += a * d - c * b; } return Math.abs(s) / 2; };
+
+/** Рядок за замовчуванням: поточний S з конструктора, інакше — найбільше комірок. */
+function preferredFitRow() {
+  const cur = fitRows.findIndex((r) => r.S === state.S);
+  if (cur >= 0) return cur;
+  let best = 0;
+  fitRows.forEach((r, i) => { if (r.S * r.P >= fitRows[best].S * fitRows[best].P) best = i; });
+  return best;
+}
+
+const arrName = (l) => ({ honeycomb: 'стільники', honeycomb2: 'щільні стільники' }[l.arrangement] || 'сітка') + (l.rotate ? ' (поверн.)' : '') + (l.shape && l.angle != null ? `, ${l.angle}°` : '');
 
 function renderFitTable(cell) {
   const head = '<thead><tr><th>Конфігурація</th><th class="num">Комірок</th><th class="num">V ном</th><th class="num">А·год</th><th class="num">Вт·год</th><th>Орієнтація</th><th>Розміщення</th><th class="num">Заповн.</th></tr></thead>';
@@ -653,7 +822,7 @@ function renderFitTable(cell) {
     return `<tr data-i="${i}"><td><b>${r.S}S${r.P}P</b>${r.layers > 1 ? ` <span class="badge warn-b">${r.layers} шари</span>` : ''}</td>`
       + `<td class="num">${N}</td><td class="num">${fmt(r.S * cell.vNom)}</td><td class="num">${fmt(r.P * cell.capacity, 2)}</td>`
       + `<td class="num">${fmt(N * cell.capacity * cell.vNom, 0)}</td><td>${r.layout.orientation}</td>`
-      + `<td>${arrName(r.layout)} ${r.layout.cols}×${r.layout.rows}</td><td class="num">${fmt(fill, 0)}%</td></tr>`;
+      + `<td>${arrName(r.layout)}${r.layout.shape ? ` · ${r.layout.count} місць` : ` ${r.layout.cols}×${r.layout.rows}`}</td><td class="num">${fmt(fill, 0)}%</td></tr>`;
   }).join('');
   $('#fitTable').innerHTML = head + `<tbody>${body}</tbody>`;
 }
@@ -664,6 +833,15 @@ function selectFit(i) {
   const r = fitRows[i];
   const cell = getCell();
   const L = r.layout;
+  if (L.shape) {
+    const lay = generateLayout({ S: r.layerS || r.S, P: r.P, gap: state.fit.gap, cell, slots: L.slots, outline: L.outline, bmsSide: state.bmsSide });
+    $('#fitHost').innerHTML = renderFitSVG({
+      planeA: lay.width, planeB: lay.height, margin: 0, aAxis: 'X', bAxis: 'Y',
+      layout: lay, layers: r.layers, depth: state.fit.thick, cellLen: cell.h, outline: lay.outline, capacity: L.count,
+    });
+    $('#fitApply').disabled = false;
+    return;
+  }
   const layout = generateLayout({ S: r.layerS || r.S, P: r.P, rows: r.rows, arrangement: L.arrangement, snake: 'cols', gap: state.fit.gap, cell, rotate: L.rotate, bmsSide: state.bmsSide });
   $('#fitHost').innerHTML = renderFitSVG({
     planeA: L.planeA, planeB: L.planeB, margin: state.fit.margin, aAxis: L.aAxis, bAxis: L.bAxis,
