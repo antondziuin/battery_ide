@@ -4,7 +4,7 @@
 
 import { terminalPoint, groupCentroids } from './layout.js';
 import { loadColor } from './analysis.js';
-import { wireColor } from './bms.js';
+import { harnessRoutes } from './routing.js';
 
 export const STRIP_COLORS = { nickel: '#b9c0c8', series: '#d4862a', copper: '#c87533', faint: '#c4cad1' };
 
@@ -74,47 +74,28 @@ export function buildScene3D(layout, cell, o = {}) {
     }
   }
 
-  // ---------- BMS і дроти
-  const side = layout.bmsSide;
-  const vertical = side === 'left' || side === 'right';
-  const edgeLen = vertical ? layout.height : layout.width;
-  const boardLen = Math.max(40, Math.min(edgeLen * 0.7, 140));
-  const boardH = Math.max(25, Math.min(h * 0.75, 70));
-  const gap = 10;
-  const boardY = h / 2;
-  let board;
-  if (side === 'right') board = { x: layout.width / 2 + gap, z: 0, sx: 2.5, sz: boardLen, nx: 1, nz: 0 };
-  else if (side === 'left') board = { x: -layout.width / 2 - gap, z: 0, sx: 2.5, sz: boardLen, nx: -1, nz: 0 };
-  else if (side === 'top') board = { x: 0, z: -layout.height / 2 - gap, sx: boardLen, sz: 2.5, nx: 0, nz: -1 };
-  else board = { x: 0, z: layout.height / 2 + gap, sx: boardLen, sz: 2.5, nx: 0, nz: 1 };
-  const pinAt = (t) => {
-    const along = (t - 0.5) * boardLen * 0.9;
-    return vertical ? [board.x, boardY + boardH / 2 - 4, board.z + along] : [board.x + along, boardY + boardH / 2 - 4, board.z];
-  };
+  // ---------- BMS і дроти (ті самі траси, що й у 2D: без перетинів)
   if (o.wires !== false) {
-    items.push({ kind: 'bms', x: board.x, y: boardY, z: board.z, sx: board.sx, sy: boardH, sz: board.sz, label: `BMS ${S}S`, nx: board.nx, nz: board.nz });
-    const edgeOut = (x, z) => {
-      // точка трохи за краєм пакета навпроти точки приварювання
-      if (side === 'right') return [layout.width / 2 + 3, z];
-      if (side === 'left') return [-layout.width / 2 - 3, z];
-      if (side === 'top') return [x, -layout.height / 2 - 3];
-      return [x, layout.height / 2 + 3];
-    };
-    const route = (cellId, bside, pin, radius, color, label) => {
-      const c = layout.cells[cellId];
-      const [tx, ty] = terminalPoint(layout, c, bside);
-      const x = X(tx), z = Z(ty);
-      const y0 = cyl ? (bside === 'top' ? h + st + lift : -st - lift) : h + 3 + st + lift;
-      const up = cyl && bside === 'bottom' ? -1 : 1;
-      const yr = y0 + up * 8;
-      const [ex, ez] = edgeOut(x, z);
-      const pts = [[x, y0, z], [x, yr, z], [ex, yr, ez], [pin[0], pin[1] + (up > 0 ? 6 : -boardH * 0.6), pin[2]], pin];
-      items.push({ kind: 'wire', color, radius, points: pts, label });
-    };
-    for (const b of layout.buses) route(b.tap, b.side, pinAt((b.index + 1) / (S + 4)), 0.9, wireColor(b.index), `B${b.index}`);
-    const pmin = pinAt((S + 2) / (S + 4)), pplus = pinAt((S + 3) / (S + 4));
-    route(layout.buses[0].power, layout.buses[0].side, pmin, 2.2, '#1d232b', 'P−');
-    route(layout.buses[S].power, layout.buses[S].side, pplus, 2.2, '#d93636', 'P+');
+    const gap = 12, thick = 2.5;
+    const H = harnessRoutes(layout, { gap, thick, minPitch: 2.6 });
+    const boardH = Math.max(25, Math.min(h * 0.75, 70));
+    const boardY = h / 2;
+    const r = H.bms;
+    const nx = { right: 1, left: -1 }[H.side] || 0, nz = { bottom: 1, top: -1 }[H.side] || 0;
+    items.push({ kind: 'bms', x: X(r.x + r.w / 2), y: boardY, z: Z(r.y + r.h / 2), sx: r.w, sy: boardH, sz: r.h, label: `BMS ${S}S`, nx, nz });
+    for (const rt of H.routes) {
+      const surfY = rt.surface === 'top' ? h + st + 1.2 + lift
+        : rt.surface === 'bottom' ? -st - 1.2 - lift
+          : h + 3 + st + 1.5 + lift;
+      // піни: дроти зверху підходять до роз'єму згори, знизу — знизу (два віяла не перетинаються)
+      const pinY = rt.surface === 'bottom' ? boardY - 3 : boardY + 3;
+      const [t, e, pin] = rt.points;
+      const T3 = [X(t[0]), surfY, Z(t[1])];
+      const E3 = [X(e[0]), surfY, Z(e[1])];
+      const D3 = [X(e[0]), pinY, Z(e[1])];
+      const P3 = [X(pin[0]), pinY, Z(pin[1])];
+      items.push({ kind: 'wire', color: rt.color, radius: rt.kind === 'power' ? 2.2 : 0.9, points: [T3, E3, D3, P3], label: rt.name, polyline: true });
+    }
   }
 
   // ---------- підписи

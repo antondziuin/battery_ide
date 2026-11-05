@@ -27,6 +27,7 @@ export function autoRows(S, P, shape = 'cyl', snake = 'cols') {
 }
 
 export const BMS_SIDES = ['right', 'left', 'top', 'bottom'];
+export const BMS_SIDE_NAMES = { right: 'праворуч', left: 'ліворуч', top: 'зверху', bottom: 'знизу' };
 
 /**
  * Точка клеми комірки на заданій стороні (у координатах схеми, мм).
@@ -166,32 +167,27 @@ export function generateLayout(o) {
     });
   }
 
-  // Точки підключення: балансувальні дроти — до комірки шини, найближчої до BMS;
-  // силові P−/P+ — біля BMS або в центрі крайньої групи.
-  const bmsSide = BMS_SIDES.includes(o.bmsSide) ? o.bmsSide : 'right';
+  // Точки підключення дротів BMS (див. planHarness): узгоджений вибір, при якому дроти
+  // не перетинаються; силові P−/P+ — біля BMS або в центрі крайньої групи.
+  const geo = { shape: cell.shape, footprint: fp, rotate: !!o.rotate, width, height, cells, buses, byGroup, S, pitchX: px, pitchY: py };
   const leadAttach = o.leadAttach === 'center' ? 'center' : 'near';
-  const edgeDist = (c) => ({ right: width - c.x, left: c.x, top: c.y, bottom: height - c.y }[bmsSide]);
-  const alongEdge = (c) => (bmsSide === 'left' || bmsSide === 'right' ? Math.abs(c.y - height / 2) : Math.abs(c.x - width / 2));
-  const nearest = (list) => list.reduce((m, c) => {
-    const d = edgeDist(c) - edgeDist(m);
-    return d < -1e-6 || (Math.abs(d) <= 1e-6 && alongEdge(c) < alongEdge(m)) ? c : m;
-  });
-  const central = (list) => {
-    const cx = list.reduce((s, c) => s + c.x, 0) / list.length, cy = list.reduce((s, c) => s + c.y, 0) / list.length;
-    return list.reduce((m, c) => (Math.hypot(c.x - cx, c.y - cy) < Math.hypot(m.x - cx, m.y - cy) - 1e-6 ? c : m));
-  };
+  const requested = BMS_SIDES.includes(o.bmsSide) ? o.bmsSide : 'auto';
+  const options = {};
+  for (const side of BMS_SIDES) options[side] = planHarness(geo, side, leadAttach);
+  const rank = { clean: 0, bundled: 1, crossing: 2 };
+  const better = (a, b) => (rank[a.quality] - rank[b.quality]) || (a.cost - b.cost);
+  const bestSide = BMS_SIDES.reduce((m, s) => (better(options[s], options[m]) < 0 ? s : m), BMS_SIDES[0]);
+  const bmsSide = requested === 'auto' ? bestSide : requested;
+  const plan = options[bmsSide];
   for (const b of buses) {
-    const mem = b.members.map((id) => cells[id]);
-    if (b.index === 0 || b.index === S) {
-      const grp = byGroup[b.index === 0 ? 0 : S - 1];
-      b.power = (leadAttach === 'center' ? central(grp) : nearest(grp)).id;
-      b.tap = b.power;
-    } else {
-      b.power = null;
-      b.tap = nearest(mem).id;
-    }
-    b.tapDist = edgeDist(cells[b.tap]);
+    b.tap = plan.taps[b.index];
+    b.power = b.index === 0 || b.index === S ? b.tap : null;
+    b.tapDist = plan.dist[b.index];
   }
+  const harness = {
+    side: bmsSide, requested, quality: plan.quality, dir: plan.dir, cost: plan.cost, bestSide,
+    alternatives: Object.fromEntries(BMS_SIDES.map((s) => [s, { quality: options[s].quality, cost: options[s].cost }])),
+  };
 
   const warnings = [];
   for (const b of buses) {
@@ -206,11 +202,116 @@ export function generateLayout(o) {
   return {
     S, P, N, rows: usedRows, cols: usedCols, cells, buses, width, height,
     pitchX: px, pitchY: py, footprint: fp, shape: cell.shape, honey, dense, snake, rotate: !!o.rotate,
-    bmsSide, leadAttach,
+    bmsSide, leadAttach, harness,
     warnings, minSeries, weakestBus,
     stripLength: buses.reduce((s, b) => s + b.links.reduce((t, l) => t + l.len, 0), 0),
     linkCount: buses.reduce((s, b) => s + b.links.length, 0),
   };
+}
+
+/**
+ * Система координат краю пакета, біля якого стоїть BMS.
+ * along — координата вздовж краю, dist — відстань від точки до краю,
+ * point(a, off) — точка на відстані off назовні від краю.
+ */
+export function edgeFrame(width, height, side) {
+  switch (side) {
+    case 'right': return { side, vertical: true, len: height, along: (p) => p[1], dist: (p) => width - p[0], point: (a, off) => [width + off, a] };
+    case 'left': return { side, vertical: true, len: height, along: (p) => p[1], dist: (p) => p[0], point: (a, off) => [-off, a] };
+    case 'top': return { side, vertical: false, len: width, along: (p) => p[0], dist: (p) => p[1], point: (a, off) => [a, -off] };
+    default: return { side: 'bottom', vertical: false, len: width, along: (p) => p[0], dist: (p) => height - p[1], point: (a, off) => [a, height + off] };
+  }
+}
+
+/** Мінімальна відстань між сусідніми «доріжками» дротів уздовж краю, мм. */
+export function harnessGap(geo) {
+  return 0.4 * Math.min(geo.pitchX, geo.pitchY);
+}
+
+/**
+ * Узгоджений вибір точок підключення дротів BMS для заданої сторони.
+ *
+ * Дріт іде від точки на шині перпендикулярно до краю пакета, а далі віялом до свого піна.
+ * Піни роз'єму стоять підряд: P−, B0, B1, …, BS, P+. Дроти не перетинаються, якщо на кожній
+ * поверхні (верх/низ) точки підключення йдуть уздовж краю в тому ж порядку, що й піни,
+ * з інтервалом не менше за harnessGap. Це задача динамічного програмування по шинах
+ * у порядку роз'єму з мінімізацією довжини дротів поверх пакета.
+ *
+ * Якість: clean — без перетинів і накладань; bundled — частина дротів іде спільним джгутом
+ * (однакова координата), але не перетинається; crossing — розвести без перетинів неможливо.
+ */
+export function planHarness(geo, side, leadAttach = 'near') {
+  const fr = edgeFrame(geo.width, geo.height, side);
+  const { S, cells, buses } = geo;
+  const central = (list) => {
+    const cx = list.reduce((t, c) => t + c.x, 0) / list.length, cy = list.reduce((t, c) => t + c.y, 0) / list.length;
+    return list.reduce((m, c) => (Math.hypot(c.x - cx, c.y - cy) < Math.hypot(m.x - cx, m.y - cy) - 1e-6 ? c : m));
+  };
+  const cand = buses.map((b) => {
+    let ids = b.members;
+    if (leadAttach === 'center' && (b.index === 0 || b.index === S)) ids = [central(geo.byGroup[b.index === 0 ? 0 : S - 1]).id];
+    return ids.map((id) => {
+      const p = terminalPoint(geo, cells[id], b.side);
+      // силові P−/P+ (шини 0 і S) товсті й струмові — їхня довжина важить більше
+      return { id, a: fr.along(p), d: fr.dist(p), w: b.index === 0 || b.index === S ? 4 : 1 };
+    });
+  });
+  const costOf = (c) => c.w * c.d + 0.05 * Math.abs(c.a - fr.len / 2);
+  const surfaces = geo.shape === 'prism'
+    ? [buses.map((b) => b.index)]
+    : ['top', 'bottom'].map((sd) => buses.filter((b) => b.side === sd).map((b) => b.index));
+
+  const minGap = harnessGap(geo);
+  const bundlePenalty = 3 * Math.max(geo.pitchX, geo.pitchY);
+  const inversionPenalty = 30 * Math.max(geo.pitchX, geo.pitchY);
+  const solve = (seq, dir, gap) => {
+    if (!seq.length) return { cost: 0, pick: [] };
+    const tables = [];
+    seq.forEach((k, i) => {
+      const row = cand[k].map((c) => {
+        if (i === 0) return { cost: costOf(c), back: -1 };
+        let best = Infinity, bi = -1;
+        const prevC = cand[seq[i - 1]];
+        tables[i - 1].forEach((pv, j) => {
+          const step = dir * (c.a - prevC[j].a);
+          if (step < gap) return;
+          // спільна траса (джгут) і зворотний порядок (перетин) — лише в запасних режимах, зі штрафом
+          const v = pv.cost + (step < -1e-6 ? inversionPenalty : step < minGap ? bundlePenalty : 0);
+          if (v < best) { best = v; bi = j; }
+        });
+        return { cost: best === Infinity ? Infinity : best + costOf(c), back: bi };
+      });
+      tables.push(row);
+    });
+    const last = tables[tables.length - 1];
+    let bi = -1;
+    last.forEach((r, j) => { if (r.cost < Infinity && (bi < 0 || r.cost < last[bi].cost)) bi = j; });
+    if (bi < 0) return null;
+    const pick = [];
+    for (let i = seq.length - 1; i >= 0; i--) { pick[i] = cand[seq[i]][bi]; bi = tables[i][bi].back; }
+    return { cost: tables[tables.length - 1].reduce((m, r) => Math.min(m, r.cost), Infinity), pick };
+  };
+
+  for (const [quality, gap] of [['clean', minGap], ['bundled', -1e-6], ['crossing', -Infinity]]) {
+    let best = null;
+    for (const dir of [1, -1]) {
+      let total = 0;
+      const res = [];
+      for (const seq of surfaces) {
+        const r = solve(seq, dir, gap);
+        if (!r) { total = Infinity; break; }
+        total += r.cost;
+        res.push([seq, r.pick]);
+      }
+      if (total < Infinity && (!best || total < best.cost)) best = { dir, cost: total, res };
+    }
+    if (best) {
+      const taps = [], dist = [];
+      for (const [seq, pick] of best.res) seq.forEach((k, i) => { taps[k] = pick[i].id; dist[k] = pick[i].d; });
+      return { quality, dir: best.dir, cost: best.cost, taps, dist };
+    }
+  }
+  throw new Error('planHarness: немає розв\'язку');
 }
 
 /** Скільки комірок вміщують R рядів щільних стільників по C (парні ряди) та C−1 (непарні). */

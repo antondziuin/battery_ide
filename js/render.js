@@ -7,7 +7,7 @@
 //   wiring   — балансувальні та силові дроти до BMS
 
 import { loadColor } from './analysis.js';
-import { wireColor } from './bms.js';
+import { wireColor, harnessRoutes } from './routing.js';
 import { terminalPoint, groupCentroids } from './layout.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -238,56 +238,33 @@ function schemeView(ctx) {
 
 // ------------------------------------------------------------------ BMS
 
-/** Геометрія блоку BMS біля відповідного краю пакета у координатах виду. */
-function bmsGeometry(ctx) {
+/**
+ * Шар BMS: блок біля краю пакета і дроти за трасами harnessRoutes (без перетинів).
+ * @param {(route)=>boolean} surfaceFilter які траси показувати в цьому виді
+ */
+function bmsLayer(ctx, surfaceFilter) {
   const { layout, fs, bmsBox, mirror } = ctx;
-  const side = mirror ? MIRROR_SIDE[layout.bmsSide] : layout.bmsSide;
-  const vertical = side === 'left' || side === 'right';
-  const edgeLen = vertical ? layout.height : layout.width;
-  const len = Math.min(Math.max(edgeLen * 0.8, fs * 8), Math.max(edgeLen, fs * 8));
-  const mid = edgeLen / 2;
-  let x, y, w, h;
-  if (side === 'right') { x = layout.width + bmsBox.gap; y = mid - len / 2; w = bmsBox.thick; h = len; }
-  else if (side === 'left') { x = -bmsBox.gap - bmsBox.thick; y = mid - len / 2; w = bmsBox.thick; h = len; }
-  else if (side === 'top') { x = mid - len / 2; y = -bmsBox.gap - bmsBox.thick; w = len; h = bmsBox.thick; }
-  else { x = mid - len / 2; y = layout.height + bmsBox.gap; w = len; h = bmsBox.thick; }
-  const S = layout.S;
-  const at = (t) => {
-    if (side === 'right') return [x, y + h * t];
-    if (side === 'left') return [x + w, y + h * t];
-    if (side === 'top') return [x + w * t, y + h];
-    return [x + w * t, y];
-  };
-  // піни роз'єму вздовж ближньої до пакета грані: B0…BS, далі силові
-  return { side, x, y, w, h, pin: (k) => at((k + 1) / (S + 4)), powerPin: (which) => at((which === 'minus' ? S + 2 : S + 3) / (S + 4)) };
-}
-
-function bmsLayer(ctx, sideFilter, termPoint) {
-  const { layout, fs } = ctx;
-  const g = bmsGeometry(ctx);
-  const S = layout.S;
-  let wires = '', box = '';
-  box += `<rect x="${f(g.x)}" y="${f(g.y)}" width="${f(g.w)}" height="${f(g.h)}" rx="${f(fs * 0.4)}" fill="#e7f0ff" stroke="${COLORS.tag}" stroke-width="${f(fs * 0.12)}"/>`;
-  box += `<text x="${f(g.x + g.w / 2)}" y="${f(g.y + g.h / 2 + fs * 0.35)}" font-size="${f(fs)}" font-weight="800" text-anchor="middle" fill="${COLORS.tag}">BMS</text>`;
-  for (const b of layout.buses) {
-    if (!sideFilter(b)) continue;
-    const [cx, cy] = termPoint(b.tap, b.side);
-    const [px, py] = g.pin(b.index);
-    const col = wireColor(b.index);
-    // біла «підкладка» під дротом — читається поверх комірок
-    wires += `<line x1="${f(cx)}" y1="${f(cy)}" x2="${f(px)}" y2="${f(py)}" stroke="#fff" stroke-width="${f(fs * 0.42)}" stroke-linecap="round"/>`;
-    wires += `<line x1="${f(cx)}" y1="${f(cy)}" x2="${f(px)}" y2="${f(py)}" stroke="${col}" stroke-width="${f(fs * 0.2)}" stroke-linecap="round"><title>Балансувальний дріт B${b.index}</title></line>`;
-    box += `<circle cx="${f(px)}" cy="${f(py)}" r="${f(fs * 0.28)}" fill="${col}"/>`;
+  const H = harnessRoutes(layout, { gap: bmsBox.gap, thick: bmsBox.thick, minPitch: fs * 0.6 });
+  const X = (x) => (mirror ? layout.width - x : x);
+  const P = (p) => `${f(X(p[0]))},${f(p[1])}`;
+  const r = H.bms;
+  const bx = mirror ? layout.width - (r.x + r.w) : r.x;
+  let halo = '', wires = '', box = '';
+  box += `<rect x="${f(bx)}" y="${f(r.y)}" width="${f(r.w)}" height="${f(r.h)}" rx="${f(fs * 0.4)}" fill="#e7f0ff" stroke="${COLORS.tag}" stroke-width="${f(fs * 0.12)}"/>`;
+  const vertical = r.h > r.w;
+  box += `<text x="${f(bx + r.w / 2)}" y="${f(r.y + r.h / 2 + fs * 0.35)}" font-size="${f(fs)}" font-weight="800" text-anchor="middle" fill="${COLORS.tag}" ${vertical ? `transform="rotate(-90 ${f(bx + r.w / 2)} ${f(r.y + r.h / 2)})"` : ''}>BMS</text>`;
+  const shown = H.routes.filter(surfaceFilter);
+  // спершу силові (товстіші), зверху — балансувальні
+  shown.sort((a, b) => (a.kind === 'power' ? 0 : 1) - (b.kind === 'power' ? 0 : 1));
+  for (const rt of shown) {
+    const w = rt.kind === 'power' ? fs * 0.42 : fs * 0.2;
+    const pts = rt.points.map(P).join(' ');
+    halo += `<polyline points="${pts}" fill="none" stroke="#fff" stroke-width="${f(w + fs * 0.24)}" stroke-linejoin="round" stroke-linecap="round"/>`;
+    wires += `<polyline points="${pts}" fill="none" stroke="${rt.color}" stroke-width="${f(w)}" stroke-linejoin="round" stroke-linecap="round"><title>${esc(rt.kind === 'power' ? (rt.name === 'P−' ? 'Силовий P− → B− BMS' : 'Силовий P+ → запобіжник') : `Балансувальний дріт ${rt.name}`)}</title></polyline>`;
+    const end = rt.points[rt.points.length - 1];
+    box += `<circle cx="${f(X(end[0]))}" cy="${f(end[1])}" r="${f(rt.kind === 'power' ? fs * 0.4 : fs * 0.26)}" fill="${rt.color}"/>`;
   }
-  for (const [b, which, col] of [[layout.buses[0], 'minus', COLORS.minus], [layout.buses[S], 'plus', COLORS.plus]]) {
-    if (!sideFilter(b)) continue;
-    const [cx, cy] = termPoint(b.power, b.side);
-    const [px, py] = g.powerPin(which);
-    wires += `<line x1="${f(cx)}" y1="${f(cy)}" x2="${f(px)}" y2="${f(py)}" stroke="#fff" stroke-width="${f(fs * 0.7)}" stroke-linecap="round"/>`;
-    wires += `<line x1="${f(cx)}" y1="${f(cy)}" x2="${f(px)}" y2="${f(py)}" stroke="${col}" stroke-width="${f(fs * 0.42)}" stroke-linecap="round"><title>${which === 'minus' ? 'Силовий P− → B− BMS' : 'Силовий P+ → запобіжник'}</title></line>`;
-    box += `<circle cx="${f(px)}" cy="${f(py)}" r="${f(fs * 0.42)}" fill="${col}"/>`;
-  }
-  return { wires, box };
+  return { wires: halo + wires, box };
 }
 
 // ------------------------------------------------------------------ детальні види
@@ -319,9 +296,8 @@ function cylView(ctx) {
     const t = dim ? '' : cellText(c, ctx);
     if (t) s += `<text x="${f(x)}" y="${f(c.y + r * 0.72)}" font-size="${f(fs * 0.62)}" text-anchor="middle" fill="${COLORS.text}" pointer-events="none">${esc(t)}</text>`;
   }
-  const term = (id) => { const c = layout.cells[id]; return [X(c.x), c.y]; };
   if (ctx.showBms) {
-    const layer = bmsLayer(ctx, (b) => b.side === side, term);
+    const layer = bmsLayer(ctx, (rt) => rt.surface === side);
     s += layer.wires + layer.box;
   }
   // мітки шин: у режимі збирання — лише номери шин, у режимі проводки — разом із силовими виводами
@@ -370,7 +346,7 @@ function prismView(ctx) {
     if (t) s += `<text x="${f(c.x)}" y="${f(c.y + fs * 0.3)}" font-size="${f(fs * 0.8)}" text-anchor="middle" fill="${COLORS.text}" pointer-events="none">${esc(t)}</text>`;
   }
   if (ctx.showBms) {
-    const layer = bmsLayer(ctx, () => true, (id, side) => T(layout.cells[id], side));
+    const layer = bmsLayer(ctx, () => true);
     s += layer.wires + layer.box;
   }
   if ((ctx.mode === 'assembly' && !ctx.noStrips) || ctx.showBms)

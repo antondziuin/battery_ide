@@ -151,6 +151,9 @@ button.wide { width: 100%; margin-top: 4px; }
 .step-row .seg { margin: 0; flex: 1; min-width: 260px; }
 .step-label { font-size: 12px; color: var(--muted); }
 .mode-hint { margin: 2px 0 8px; }
+#bomTable td:first-child, #bomTable td:last-child { white-space: normal; }
+#bomTable td:last-child { min-width: 140px; }
+.side-hint { margin: -4px 0 8px; color: var(--text); }
 .view3d { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .v3d-toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .v3d-toolbar label { margin: 0; }

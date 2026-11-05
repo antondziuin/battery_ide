@@ -1,5 +1,6 @@
 import { BUILTIN_CELLS, validateCell } from './cells.js';
-import { generateLayout, packStats, autoRows } from './layout.js';
+import { generateLayout, packStats, autoRows, BMS_SIDE_NAMES } from './layout.js';
+import { harnessRoutes, routeConflicts, stripRuns, cutList, stripClearance } from './routing.js';
 import { bestConfigs, checkConfig, requiredBox } from './fit.js';
 import { renderPackSVG, renderFitSVG, svgToPng, VIEW_MODES } from './render.js';
 import { buildScene3D } from './scene3d.js';
@@ -22,7 +23,7 @@ const state = {
   S: 10, P: 4, rows: '', gap: 0.5, arrangement: 'grid', snake: 'cols', rotate: false,
   labels: 'group', load: 20, mirror: true, balance: true,
   stripMat: 'nickel', stripW: 8, stripT: 0.15, stripL: 1,
-  bmsSide: 'right', leadAttach: 'near',
+  bmsSide: 'auto', leadAttach: 'near',
   viewMode: 'scheme', step: 'all',
   v3d: { explode: 0, strips: true, wires: true, labels: true, enclosure: false, color: 'type' },
   zoom: 1,
@@ -303,18 +304,21 @@ function renderDesigner() {
   }
   if (stats.perCell && stats.perCell > cell.iMax)
     warns.push(`Струм на одну комірку ${fmt(stats.perCell)} А перевищує допустимий ${cell.iMax} А. Збільште P.`);
+  const comm = commutation(cell, layout);
+  warns.push(...comm.warnings);
+  $('#bmsSideHint').textContent = sideHint(layout, comm);
   if (state.labels === 'capacity' && !cellLabels)
     warns.push('Немає результату балансування для цієї конфігурації — розподіліть комірки на вкладці «Балансування комірок».');
   $('#warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${esc(w)}</div>`).join('');
 
   const plan = currentPlan(cell, layout);
-  renderStats(cell, stats, layout, strip, perLink, analysis, plan);
-  renderBom(cell, stats, layout, plan);
+  renderStats(cell, stats, layout, strip, perLink, analysis, plan, comm);
+  renderBom(cell, stats, layout, plan, comm);
   renderSteps(cell, layout, plan);
   if ($('#tab-bms').classList.contains('active')) renderBms();
 }
 
-function renderStats(cell, st, layout, strip, perLink, a, plan) {
+function renderStats(cell, st, layout, strip, perLink, a, plan, comm) {
   const box = requiredBox(layout, cell, { margin: state.fit.margin, depthReserve: state.fit.depth });
   const ok = a && a.ok;
   const cards = [
@@ -342,19 +346,25 @@ function renderStats(cell, st, layout, strip, perLink, a, plan) {
     ['Маса', `${fmt(st.massEst / 1000, 2)} кг`, `комірки ${fmt(st.cellsMass / 1000, 2)} кг`],
     ['Розмір блоку', `${fmt(layout.width, 0)}×${fmt(layout.height, 0)}`, `× ${fmt(cell.h, 0)} мм (корпус від ${fmt(box.a, 0)}×${fmt(box.b, 0)}×${fmt(box.depth, 0)})`],
     ['BMS', `${plan.channels}S · ${plan.bmsCurrent} А`, `запобіжник ${fmt(plan.fuse, 1)} А, заряд ${fmt(plan.pack.charge, 1)} В`, plan.checks.some((c) => c.level === 'bad') ? 'bad' : ''],
+    ['Комутація', comm.conflicts.crossings.length ? `${comm.conflicts.crossings.length} перетинів` : '0 перетинів',
+      `дроти BMS ${BMS_SIDE_NAMES[layout.bmsSide]}${comm.conflicts.overlaps.length ? `, ${comm.conflicts.overlaps.length} у джгуті` : ''}; зазор між шинами ${comm.clearance.minGap == null ? '—' : `≥ ${fmt(comm.clearance.minGap, 1)} мм`}`,
+      comm.conflicts.crossings.length || comm.clearance.violations.length ? 'bad' : 'ok'],
+    [cell.shape === 'cyl' ? 'Стрічка' : 'Шини', `${comm.cuts.pieces * (cell.shape === 'cyl' ? state.stripL : 1)} шт`,
+      `${comm.cuts.pieces} відрізків замість ${layout.linkCount} перемичок; ≈ ${fmt(comm.cuts.total * (cell.shape === 'cyl' ? state.stripL : 1) / 1000, 2)} м`],
   ].filter(Boolean);
   $('#statsCards').innerHTML = cards.map(([k, v, s, cls = '']) =>
     `<div class="card ${cls}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s || ''}</div></div>`).join('');
 }
 
-function renderBom(cell, st, layout, plan) {
-  const stripM = (layout.stripLength + layout.linkCount * 6) / 1000 * state.stripL;
+function renderBom(cell, st, layout, plan, comm) {
   const cyl = cell.shape === 'cyl';
+  const L = cyl ? state.stripL : 1;
+  const cutText = comm.cuts.items.slice(0, 8).map((i) => `${i.count * L} шт × ${i.len}`).join(', ') + (comm.cuts.items.length > 8 ? ', …' : '');
   const pw = plan.power.recommended;
   const rows = [
     [`Комірка ${cell.name}`, st.N, 'шт'],
-    cyl ? ['Тримачі (холдери) комірок', `${st.N * 2}`, 'шт (верх+низ)'] : ['Шини/busbar', layout.linkCount, 'шт'],
-    cyl ? [`Стрічка ${STRIP_MATERIALS[state.stripMat].name} ${state.stripW}×${state.stripT} мм`, fmt(stripM * 1.2, 2), 'м (з запасом 20%)'] : null,
+    cyl ? ['Тримачі (холдери) комірок', `${st.N * 2}`, 'шт (верх+низ)'] : ['Шини/busbar (мідь)', comm.cuts.pieces, `шт (довжини з напуском на клеми): ${cutText} мм`],
+    cyl ? [`Стрічка ${STRIP_MATERIALS[state.stripMat].name} ${state.stripW}×${state.stripT} мм${L > 1 ? `, ${L} шари` : ''}`, comm.cuts.pieces * L, `відрізків (з напуском на зварювання): ${cutText} мм; разом ≈ ${fmt(comm.cuts.total * L / 1000, 2)} м`] : null,
     cyl ? ['Ізоляційні кільця (fish paper) на «+»', st.N, 'шт'] : null,
     [`BMS ${plan.channels}S ${cell.chem}, ${BMS_PORTS[plan.port].split(' (')[0].toLowerCase()}, ≥ ${plan.bmsCurrent} А`, 1, 'шт'],
     [`Балансувальні дроти ${plan.balanceAwg}–24 AWG (B0…B${state.S})`, st.balanceWires, `шт, ≈ ${fmt(plan.balanceLength / 1000, 2)} м разом`],
@@ -384,6 +394,38 @@ function renderSteps(cell, layout, plan) {
     `Перший заряд — малим струмом під наглядом, перевірте балансування груп.`,
   ];
   $('#assemblySteps').innerHTML = steps.map((s) => `<li>${esc(s)}</li>`).join('');
+}
+
+// ------------------------------------------------------------------ комутація
+/** Перевірка розводки: перетини дротів BMS, зазори між шинами, нарізка стрічки. */
+function commutation(cell, layout) {
+  const cyl = cell.shape === 'cyl';
+  const width = cyl ? state.stripW : Math.min(layout.footprint.w, layout.footprint.h) * 0.3;
+  const harness = harnessRoutes(layout, { gap: 15, thick: 4 });
+  const conflicts = routeConflicts(harness.routes);
+  const clearance = stripClearance(layout, width, 1);
+  const cuts = cutList(stripRuns(layout), cyl ? Math.min(cell.d * 0.25, 5) : 8);
+  const warnings = [];
+  const h = layout.harness;
+  const best = h.bestSide !== layout.bmsSide && h.alternatives[h.bestSide].quality === 'clean' ? ` Чисте розведення — BMS ${BMS_SIDE_NAMES[h.bestSide]} (або «Автоматично»).` : '';
+  if (conflicts.crossings.length)
+    warnings.push(`Дроти до BMS перетинаються в ${conflicts.crossings.length} місцях: з цього боку розвести їх без перетинів неможливо.${best || ' Змініть розкладку або кількість рядів.'}`);
+  else if (conflicts.overlaps.length && best)
+    warnings.push(`З цього боку частина балансувальних дротів іде спільним джгутом поверх пакета (${conflicts.overlaps.length} пар).${best}`);
+  const strips = clearance.violations.filter((v) => v.kind === 'strips');
+  const terms = clearance.violations.filter((v) => v.kind === 'terminal');
+  if (strips.length) {
+    const v = strips.reduce((m, x) => (x.gap < m.gap ? x : m));
+    warnings.push(`Оголені ${cyl ? 'перемички' : 'шини'} різних потенціалів B${v.buses[0]} та B${v.buses[1]} розташовані надто близько (${v.gap < 0 ? 'перекриваються' : `${fmt(v.gap, 1)} мм`}). Зменште ширину ${cyl ? 'стрічки' : 'шин'} або збільште зазор між комірками.`);
+  }
+  if (terms.length)
+    warnings.push(`${cyl ? 'Перемичка' : 'Шина'} B${terms[0].buses[0]} проходить над клемою комірки #${terms[0].cell + 1} іншої шини (B${terms[0].buses[1]}) — ризик замикання; потрібна ізоляція або інша траса.`);
+  return { harness, conflicts, clearance, cuts, warnings };
+}
+
+function sideHint(layout, comm) {
+  const q = comm.conflicts.crossings.length ? 'є перетини' : comm.conflicts.overlaps.length ? 'без перетинів, частина дротів у джгуті' : 'без перетинів';
+  return `${layout.harness.requested === 'auto' ? 'Обрано автоматично: ' : ''}BMS ${BMS_SIDE_NAMES[layout.bmsSide]} — ${q}.`;
 }
 
 // ------------------------------------------------------------------ 3D
@@ -474,6 +516,7 @@ function renderBms() {
   $('#bmsI').placeholder = `авто (${plan.recCurrent})`;
   $('#bmsChA').placeholder = `авто (${fmt(plan.chargeA, 1)})`;
   $('#bmsCfg').textContent = `${layout.S}S${layout.P}P, ${cell.name}, навантаження ${fmt(state.load)} А`;
+  $('#bmsSideHint2').textContent = $('#bmsSideHint').textContent;
   currentBmsSvg = renderBmsSVG(plan, cell, state.load);
   $('#bmsHost').innerHTML = currentBmsSvg;
 

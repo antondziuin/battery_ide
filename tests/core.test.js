@@ -411,3 +411,109 @@ test('3D-сцена для призматичних комірок', () => {
   assert.ok(sc.items.some((i) => i.kind === 'wire' && i.radius === 3)); // кабель між рядами
   assert.ok(!/NaN|Infinity/.test(JSON.stringify(sc)));
 });
+
+// ------------------------------------------------------------------ комутація
+import { harnessRoutes, routeConflicts, stripRuns, cutList, stripClearance, segmentDistance } from '../js/routing.js';
+import { renderBmsSchematic } from '../js/schematic.js';
+
+test('дроти BMS не перетинаються: перебір розкладок, змійок і сторін', () => {
+  let checked = 0, clean = 0;
+  for (const arrangement of ['grid', 'honeycomb', 'honeycomb2'])
+    for (const snake of ['cols', 'rows', 'u'])
+      for (const [S, P, rows] of [[4, 3, 3], [7, 3, 3], [10, 4, 4], [13, 4, 8], [14, 5, 5], [3, 5, 4], [16, 2, 4], [20, 6, 6]])
+        for (const bmsSide of ['auto', 'right', 'left', 'top', 'bottom'])
+          for (const leadAttach of ['near', 'center']) {
+            const L = generateLayout({ S, P, rows, arrangement, snake, gap: 0.5, cell: c18650, bmsSide, leadAttach });
+            const c = routeConflicts(harnessRoutes(L, { gap: 15, thick: 4 }).routes);
+            const tag = `${arrangement}/${snake} ${S}S${P}P BMS:${bmsSide}→${L.bmsSide} ${leadAttach} (${L.harness.quality})`;
+            if (L.harness.quality !== 'crossing') assert.equal(c.crossings.length, 0, `${tag}: ${JSON.stringify(c.crossings)}`);
+            if (L.harness.quality === 'clean') { assert.equal(c.overlaps.length, 0, tag); clean++; }
+            if (bmsSide === 'auto') {
+              // автовибір бере найкращу сторону
+              const qs = Object.values(L.harness.alternatives).map((a) => a.quality);
+              if (qs.includes('clean')) assert.equal(L.harness.quality, 'clean', tag);
+              assert.notEqual(L.harness.quality, 'crossing', tag);
+            }
+            checked++;
+          }
+  assert.ok(checked > 600 && clean > 0, `${clean}/${checked}`);
+});
+
+test('дроти: B0 і P− виходять з однієї точки, порядок пінів відповідає порядку точок', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700, bmsSide: 'bottom' });
+  assert.equal(L.harness.quality, 'clean');
+  const H = harnessRoutes(L, { gap: 15, thick: 4 });
+  const r = Object.fromEntries(H.routes.map((x) => [x.name, x]));
+  assert.deepEqual(r['P−'].points[0], r.B0.points[0]);
+  assert.deepEqual(r['P+'].points[0], r.B10.points[0]);
+  // уздовж краю (вісь x для нижнього краю) точки підключення йдуть у порядку пінів
+  for (const surf of ['top', 'bottom']) {
+    const seq = H.routes.filter((x) => x.kind === 'balance' && x.surface === surf).sort((a, b) => a.k - b.k);
+    for (let i = 1; i < seq.length; i++) {
+      assert.ok(H.dir * (seq[i].points[0][0] - seq[i - 1].points[0][0]) > 0);
+      assert.ok(H.dir * (seq[i].points[2][0] - seq[i - 1].points[2][0]) > 0);
+    }
+  }
+  // уся траса — поза перемичками інших шин: дріт іде перпендикулярно до краю, далі віялом
+  assert.ok(H.routes.every((x) => x.points.length === 3));
+});
+
+test('стрічка: суцільні відрізки замість окремих перемичок, зазори між шинами', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700 });
+  const runs = stripRuns(L);
+  assert.ok(runs.length < L.linkCount);
+  assert.equal(runs.reduce((s, r) => s + r.links, 0), L.linkCount);
+  const totalLinks = L.buses.reduce((s, b) => s + b.links.reduce((t, l) => t + l.len, 0), 0);
+  assert.ok(Math.abs(runs.reduce((s, r) => s + r.len, 0) - totalLinks) < 1e-6);
+  // у класичному розташуванні кожна група — один вертикальний відрізок на кожній стороні
+  assert.equal(runs.filter((r) => Math.abs(r.a[0] - r.b[0]) < 1e-6 && r.len > L.pitchY * 2.5).length, 10 * 2 - 2 + 2);
+  const cl = cutList(runs, 4);
+  assert.equal(cl.pieces, runs.length);
+  assert.ok(cl.total > totalLinks);
+  const ok = stripClearance(L, 8, 1);
+  assert.equal(ok.violations.length, 0);
+  assert.ok(ok.minGap > 10);
+  // надто широка стрічка — оголені шини різних потенціалів майже торкаються
+  const bad = stripClearance(generateLayout({ S: 6, P: 3, rows: 3, arrangement: 'honeycomb', snake: 'cols', gap: 0.2, cell: c18650 }), 17.5, 1);
+  assert.ok(bad.violations.some((v) => v.kind === 'strips'));
+  for (const arrangement of ['grid', 'honeycomb', 'honeycomb2'])
+    for (const snake of ['cols', 'rows', 'u']) {
+      const X = generateLayout({ S: 13, P: 4, rows: 4, arrangement, snake, gap: 0.5, cell: c18650 });
+      assert.equal(stripClearance(X, 8, 1).violations.length, 0, `${arrangement}/${snake}`);
+    }
+});
+
+test('електрична схема BMS: провідники різних мереж ніде не перетинаються і не торкаються', () => {
+  for (const [S, P, cfg] of [
+    [4, 1, { type: 'hardware', port: 'common', ntc: 1, sw: true }],
+    [10, 4, { type: 'hardware', port: 'separate', ntc: 2, sw: true, precharge: true }],
+    [13, 4, { type: 'smart', port: 'common', channels: 16, ntc: 3, sw: false }],
+    [16, 2, { type: 'smart', port: 'separate', channels: 24, ntc: 0, sw: true, precharge: true }],
+    [1, 2, { type: 'hardware', port: 'common', ntc: 1, sw: false }],
+  ]) {
+    const L = generateLayout({ S, P, rows: P, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700 });
+    const plan = bmsPlan(c21700, L, cfg, 20);
+    const { svg, nets } = renderBmsSchematic(plan, c21700, 20);
+    assert.ok(!/NaN|undefined/.test(svg));
+    const segs = nets.flatMap((n) => n.pts.slice(1).map((p, i) => ({ net: n.net, a: n.pts[i], b: p })));
+    for (let i = 0; i < segs.length; i++)
+      for (let j = i + 1; j < segs.length; j++) {
+        if (segs[i].net === segs[j].net) continue;
+        const d = segmentDistance(segs[i].a, segs[i].b, segs[j].a, segs[j].b);
+        assert.ok(d > 0.5, `${S}S ${cfg.port}: ${segs[i].net} × ${segs[j].net} (${d.toFixed(2)})`);
+      }
+    if (cfg.port === 'separate') assert.ok(nets.some((n) => n.net === 'C−'));
+  }
+});
+
+test('3D: дроти — ламані за тими ж трасами, що й у 2D', () => {
+  const L = generateLayout({ S: 10, P: 4, rows: 4, arrangement: 'grid', snake: 'cols', gap: 0.5, cell: c21700, bmsSide: 'top' });
+  const sc = buildScene3D(L, c21700, { strip });
+  const wires = sc.items.filter((i) => i.kind === 'wire');
+  assert.equal(wires.length, 13);
+  assert.ok(wires.every((w) => w.polyline && w.points.length === 4));
+  // дроти зверху підходять до роз'єму згори, знизу — знизу
+  const top = wires.filter((w) => w.points[0][1] > c21700.h), bottom = wires.filter((w) => w.points[0][1] < 0);
+  assert.ok(top.length && bottom.length);
+  assert.ok(Math.min(...top.map((w) => w.points[3][1])) > Math.max(...bottom.map((w) => w.points[3][1])));
+});
